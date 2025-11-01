@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=42", "wheel", "twine"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rhopca"
+version = "0.1.0"
+description = "Target vs Background PCA for single-cell analysis"
+authors = [
+    { name = "Maria T. Carilli", email = "mcarilli@caltech.edu" }
+]
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.9"
+dependencies = [
+    "numpy>=1.23",
+    "scipy>=1.9",
+    "matplotlib>=3.7",
+    "seaborn>=0.12",
+    "anndata>=0.9",
+    "scanpy>=1.9"
+]
+urls = { "Homepage" = "https://github.com/pachterlab/rhopca" }
