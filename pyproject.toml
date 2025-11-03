@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "rhopca"
 version = "0.1.0"
-description = "Target vs Background PCA for single-cell analysis"
+description = "Target vs background variance dimensionality reduction for single-cell analyses."
 authors = [
     { name = "Maria T. Carilli", email = "mcarilli@caltech.edu" }
 ]
@@ -21,10 +21,11 @@ dependencies = [
     "scanpy>=1.9"
 ]
 
+[project.urls]
+Homepage = "https://github.com/pachterlab/rhopca"
+Issues = "https://github.com/pachterlab/rhopca/issues"
+
 [tool.setuptools.packages.find]
 where = ["src"]
+exclude = ["examples*", "assets*"]
 
-# Do not include examples or test files in the package distribution
-exclude = ["examples*","assets*"]
-
-urls = { "Homepage" = "https://github.com/pachterlab/rhopca" }
