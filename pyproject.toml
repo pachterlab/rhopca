@@ -25,6 +25,6 @@ dependencies = [
 where = ["src"]
 
 # Do not include examples or test files in the package distribution
-exclude = ["examples*"]
+exclude = ["examples*","assets*"]
 
 urls = { "Homepage" = "https://github.com/pachterlab/rhopca" }
