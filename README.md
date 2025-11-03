@@ -7,3 +7,11 @@ $\rho$ PCA finds axes that maximize variation in the target samples while minimi
 
 ![Schematic of the method](assets/schematic.png)
 
+## Installation
+
+### From PyPI
+
+This package can be installed directly from PyPI:
+
+```bash
+pip install rhopca
