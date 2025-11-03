@@ -1,6 +1,10 @@
 import numpy as np
+import pandas as pd 
+
 from scipy.linalg import eigh, eig
+
 import warnings
+
 import matplotlib.pyplot as plt
 import seaborn as sns
 
@@ -112,51 +116,123 @@ class rhoPCA:
         genes = self.adata.var.index
         gene_scores = np.abs(self.loadings[:, GE - 1])
         idx = np.argsort(gene_scores)[-n_genes:][::-1]  # descending order
-        return genes[idx]
+        return list(genes[idx])
 
-    def plot_scatter(self, x_GE=1, y_GE=2, color_by=None, colors=None):
+
+    def plot_scatter(self, x_GE=1, y_GE=2, color_by=None, palette="tab10"):
         """
-        Scatter plot of two generalized eigenvectors for target and background.
-
+        Scatter plot of two generalized eigenvectors for target and background
+        using Seaborn for automatic coloring and legends.
+    
         Parameters
         ----------
         x_GE, y_GE : int
             Indices of generalized eigenvectors to plot (1-based).
         color_by : str
-            Column in adata.obs to color points by.
-        colors : list or array
-            Colors to use if color_by is None.
+            Column in adata.obs to color points by. If None, just use Target/Background.
+        palette : str or list
+            Seaborn palette name or list of colors.
         """
+    
+        # --- Bounds checking ---
         if x_GE > self.loadings.shape[1] or y_GE > self.loadings.shape[1]:
-            raise ValueError("Selected GE exceeds calculated number of eigenvectors.")
-
-        fig, ax = plt.subplots(1, 2, figsize=(12, 6), sharex=True, sharey=True)
-
-        # Color assignment
+            raise ValueError(f"Selected GE exceeds calculated number of eigenvectors "
+                             f"(max = {self.loadings.shape[1]}).")
+    
+        import seaborn as sns
+        import matplotlib.pyplot as plt
+        import pandas as pd
+        import numpy as np
+    
+        # --- Prepare DataFrames for Seaborn ---
+        target_df = pd.DataFrame({
+            f"GE{x_GE}": self.target_proj[:, x_GE-1],
+            f"GE{y_GE}": self.target_proj[:, y_GE-1],
+            "Group": "Target"
+        })
+    
+        background_df = pd.DataFrame({
+            f"GE{x_GE}": self.background_proj[:, x_GE-1],
+            f"GE{y_GE}": self.background_proj[:, y_GE-1],
+            "Group": "Background"
+        })
+    
+        # If coloring by a column
         if color_by is not None:
-            target_colors = self.adata[self.filt_target].obs[color_by].values
-            background_colors = self.adata[self.filt_background].obs[color_by].values
-        elif colors is not None:
-            target_colors = colors[0]
-            background_colors = colors[1]
+            target_df[color_by] = self.adata[self.filt_target].obs[color_by].values
+            background_df[color_by] = self.adata[self.filt_background].obs[color_by].values
+    
+        # Combine target and background
+        plot_df = pd.concat([target_df, background_df], ignore_index=True)
+    
+        # --- Plot ---
+        fig, axes = plt.subplots(1, 2, figsize=(12, 6), sharex=True, sharey=True)
+    
+        # Target
+        if color_by is not None:
+            sns.scatterplot(
+                data=plot_df[plot_df["Group"]=="Target"],
+                x=f"GE{x_GE}", y=f"GE{y_GE}",
+                hue=color_by,
+                palette=palette,
+                ax=axes[0],
+                s=40,
+                alpha=0.7
+            )
         else:
-            target_colors = 'red'
-            background_colors = 'blue'
-
-        ax[0].scatter(self.target_proj[:, x_GE - 1], self.target_proj[:, y_GE - 1], c=target_colors)
-        ax[0].set_xlabel(f'GE {x_GE}', fontsize=12)
-        ax[0].set_ylabel(f'GE {y_GE}', fontsize=12)
-        ax[0].grid(linestyle='--', color='gray')
-
-        ax[1].scatter(self.background_proj[:, x_GE - 1], self.background_proj[:, y_GE - 1], c=background_colors)
-        ax[1].set_xlabel(f'GE {x_GE}', fontsize=12)
-        ax[1].set_ylabel(f'GE {y_GE}', fontsize=12)
-        ax[1].grid(linestyle='--', color='gray')
-
+            sns.scatterplot(
+                data=plot_df[plot_df["Group"]=="Target"],
+                x=f"GE{x_GE}", y=f"GE{y_GE}",
+                hue="Group",
+                palette={"Target": "red"},
+                ax=axes[0],
+                s=40,
+                alpha=0.7,
+                legend=False
+            )
+    
+        axes[0].set_title("Target: " + str(self.target), fontsize=14)
+        axes[0].grid(linestyle='--', color='lightgray', alpha=0.7)
+    
+        # Background
+        if color_by is not None:
+            sns.scatterplot(
+                data=plot_df[plot_df["Group"]=="Background"],
+                x=f"GE{x_GE}", y=f"GE{y_GE}",
+                hue=color_by,
+                palette=palette,
+                ax=axes[1],
+                s=40,
+                alpha=0.7,
+                legend=False  # Avoid duplicate legends
+            )
+        else:
+            sns.scatterplot(
+                data=plot_df[plot_df["Group"]=="Background"],
+                x=f"GE{x_GE}", y=f"GE{y_GE}",
+                hue="Group",
+                palette={"Background": "blue"},
+                ax=axes[1],
+                s=40,
+                alpha=0.7,
+                legend=False
+            )
+    
+        axes[1].set_title("Background: " + str(self.background), fontsize=14)
+        axes[1].grid(linestyle='--', color='lightgray', alpha=0.7)
+    
+        # --- Legend ---
+        if color_by is not None:
+            handles, labels = axes[1].get_legend_handles_labels()
+            fig.legend(handles, labels, title=color_by,
+                       bbox_to_anchor=(1.02, 0.5), loc='center left', borderaxespad=0.0)
+    
         plt.tight_layout()
         plt.show()
 
-    def plot_hist(self, GE=1, color_by=None, colors=None):
+
+
+    def plot_hist(self, GE=1, color_by=None, colors=None, color=None):
         """
         Plot histograms (with KDE) of target and background projections for a GE.
 
@@ -180,7 +256,8 @@ class rhoPCA:
         if color_by is not None:
             cts = self.adata.obs[color_by].unique()
         else:
-            cts = [self.target, self.background]
+            cts = [self.target]
+            colors = [color or colors[0]]
 
         fig, ax = plt.subplots(len(cts), 1, figsize=(5, 4 * len(cts)), sharex=False)
 
@@ -191,20 +268,76 @@ class rhoPCA:
             if color_by is not None:
                 filt_target = (self.adata[self.filt_target].obs[color_by].values == ct)
                 filt_background = (self.adata[self.filt_background].obs[color_by].values == ct)
+                title = f' - {ct}\n'
             else:
                 filt_target = slice(None)
                 filt_background = slice(None)
+                title = f'\n'
 
-            sns.histplot(self.target_proj[filt_target, GE - 1], kde=True,
-                         color=colors[0], stat="density", ax=ax[i], alpha=0.6)
-            sns.histplot(self.background_proj[filt_background, GE - 1], kde=True,
-                         color=colors[1], stat="density", ax=ax[i], alpha=0.6)
+            t = self.target_proj[filt_target, GE - 1]
+            b = self.background_proj[filt_background, GE - 1]
+            rho = np.var(t)/np.var(b)
+            
+            sns.histplot(t, kde=True,
+                         color=colors[0], stat="density", ax=ax[i], alpha=0.6,label=self.target)
+            sns.histplot(b, kde=True,
+                         color="gray", stat="density", ax=ax[i], alpha=0.6,label=self.background)
 
             ax[i].grid(alpha=0.2)
             ax[i].spines['top'].set_visible(False)
             ax[i].spines['right'].set_visible(False)
             ax[i].set_ylabel('Density')
-            ax[i].set_title(f"GE {GE} distribution — {ct}")
+            ax[i].legend()
+            ax[i].set_title(f"GE {GE} distribution " + title + r" $\rho$ = " + f" {rho:.3f}")
 
         plt.tight_layout()
         plt.show()
+
+    def get_rhos(self, group_by=None):
+        """
+        Compute target/background variance ratios (rho) across GEs,
+        optionally grouped by a categorical variable in adata.obs.
+        """
+    
+        n_GEs = self.loadings.shape[1]
+        if group_by is not None:
+            groups = self.adata.obs[group_by].unique()
+        else:
+            groups = np.array(['All'])
+        n_groups = len(groups)
+    
+
+        target_obs = self.adata[self.filt_target].obs
+        background_obs = self.adata[self.filt_background].obs
+    
+        if group_by is not None:
+            target_masks = {g: (target_obs[group_by].values == g) for g in groups}
+            background_masks = {g: (background_obs[group_by].values == g) for g in groups}
+        else:
+            target_masks = {'All': np.ones(target_obs.shape[0], dtype=bool)}
+            background_masks = {'All': np.ones(background_obs.shape[0], dtype=bool)}
+    
+        rhos = np.empty((n_groups, n_GEs))
+        for i, group in enumerate(groups):
+            t_mask = target_masks[group]
+            b_mask = background_masks[group]
+    
+            t_proj = self.target_proj[t_mask, :]
+            b_proj = self.background_proj[b_mask, :]
+    
+            t_var = np.var(t_proj, axis=0, ddof=1)
+            b_var = np.var(b_proj, axis=0, ddof=1)
+    
+            rho = np.divide(t_var, b_var, out=np.full_like(t_var, np.nan), where=b_var > 0)
+            rhos[i, :] = rho
+    
+        df_ = pd.DataFrame(
+            data=rhos,
+            index=groups,
+            columns=[f"GE {i+1}" for i in range(n_GEs)]
+        )
+    
+        return df_
+    
+
+                

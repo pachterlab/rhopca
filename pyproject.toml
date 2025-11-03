@@ -20,4 +20,11 @@ dependencies = [
     "anndata>=0.9",
     "scanpy>=1.9"
 ]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+# Do not include examples or test files in the package distribution
+exclude = ["examples*"]
+
 urls = { "Homepage" = "https://github.com/pachterlab/rhopca" }
