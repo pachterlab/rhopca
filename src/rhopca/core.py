@@ -53,8 +53,17 @@ class rhoPCA:
 
         self.n_GEs = n_GEs if n_GEs is not None else adata.shape[1]
 
-    def fit(self):
-        """Compute generalized eigen decomposition of target vs background covariance."""
+    def fit(self, method = 'schur', mu = None):
+        """Compute generalized eigen decomposition of target vs background covariance.
+        Parameters 
+        -----------
+        method : ['tikhonov', 'schur'], default = 'schur'
+            If Tikhonov, adds a small ridge (diagonal matrix) to Sigma_B if it is singular.
+            If schur, reports values and vectors for all non-zero and finite eigenvalues found using Generalized Schur decomposition (see scipy.linalg.eig)
+        mu : float, default = None
+            Small ridge to add to Sigma_B along diagonal if method is 'tikhonov.' If None, adds 1e-6*trace(Sigma_B)/n_background_samples
+        """
+        self.method = method
 
         # Extract counts
         target_counts = self.adata[self.filt_target].X.toarray()
@@ -74,9 +83,14 @@ class rhoPCA:
         except np.linalg.LinAlgError:
             warnings.warn(
                 "Covariance matrix of background is not positive definite: "
-                "falling back to eig, keeping real positive eigenvalues."
+                f"falling back to {self.method}."
             )
-            eigvals_rq, eigvecs_rq = eig(Sigma_t, Sigma_b)
+            if self.method == 'schur':
+                eigvals_rq, eigvecs_rq = eig(Sigma_t, Sigma_b)
+            elif self.method == 'tikhonov':
+                ps = 1e-6 * np.trace(Sigma_b) / Sigma_b.shape[0]  # scale regularization if not positive definite
+                Sigma_b_reg = Sigma_b + eps * np.eye(Sigma_b.shape[0])
+                eigvals_rq, eigvecs_rq = eigh(Sigma_t, Sigma_b_reg)
 
         # Keep only finite, positive eigenvalues
         filt = (eigvals_rq > 0) & (np.isfinite(eigvals_rq))
@@ -139,10 +153,6 @@ class rhoPCA:
             raise ValueError(f"Selected GE exceeds calculated number of eigenvectors "
                              f"(max = {self.loadings.shape[1]}).")
     
-        import seaborn as sns
-        import matplotlib.pyplot as plt
-        import pandas as pd
-        import numpy as np
     
         # --- Prepare DataFrames for Seaborn ---
         target_df = pd.DataFrame({
@@ -184,7 +194,7 @@ class rhoPCA:
                 data=plot_df[plot_df["Group"]=="Target"],
                 x=f"GE{x_GE}", y=f"GE{y_GE}",
                 hue="Group",
-                palette={"Target": "red"},
+                palette={"Target": "blue"},
                 ax=axes[0],
                 s=40,
                 alpha=0.7,
@@ -211,7 +221,7 @@ class rhoPCA:
                 data=plot_df[plot_df["Group"]=="Background"],
                 x=f"GE{x_GE}", y=f"GE{y_GE}",
                 hue="Group",
-                palette={"Background": "blue"},
+                palette={"Background": "red"},
                 ax=axes[1],
                 s=40,
                 alpha=0.7,
