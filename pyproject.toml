@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "rhopca"
-version = "0.1.0"
+version = "0.1.1"
 description = "Target vs background variance dimensionality reduction for single-cell analyses."
 authors = [
     { name = "Maria T. Carilli", email = "mcarilli@caltech.edu" }
@@ -17,8 +17,7 @@ dependencies = [
     "scipy>=1.9",
     "matplotlib>=3.7",
     "seaborn>=0.12",
-    "anndata>=0.9",
-    "scanpy>=1.9"
+    "anndata>=0.9"
 ]
 
 [project.urls]
