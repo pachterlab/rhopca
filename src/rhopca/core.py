@@ -36,7 +36,7 @@ class rhoPCA:
         Number of generalized eigenvectors to keep. Defaults to all.
     """
 
-    def __init__(self, adata, contrast_column, target, background, n_GEs=None):
+    def __init__(self, adata, contrast_column, target, background, standardize = False, n_GEs=None):
         contrast_values = adata.obs[contrast_column].values
 
         for field in [target, background]:
@@ -47,6 +47,7 @@ class rhoPCA:
         self.contrast_column = contrast_column
         self.target = target
         self.background = background
+        self.standardize = standardize
 
         self.filt_target = contrast_values == target
         self.filt_background = contrast_values == background
@@ -70,12 +71,14 @@ class rhoPCA:
         background_counts = self.adata[self.filt_background].X.toarray()
 
         # Standardize
-        target_std = standardize_array(target_counts)
-        background_std = standardize_array(background_counts)
+        if self.standardize:
+            target_counts = standardize_array(target_counts)
+            background_counts = standardize_array(background_counts)
+            
 
         # Covariance matrices
-        Sigma_t = np.cov(target_std, rowvar=False)
-        Sigma_b = np.cov(background_std, rowvar=False)
+        Sigma_t = np.cov(target_counts, rowvar=False)
+        Sigma_b = np.cov(background_counts, rowvar=False)
 
         # Generalized eigen decomposition
         try:
@@ -107,8 +110,8 @@ class rhoPCA:
         self.eigvecs = eigvecs_rq[:, :self.n_GEs]
 
         # Project data
-        self.target_proj = target_std @ self.eigvecs
-        self.background_proj = background_std @ self.eigvecs
+        self.target_proj = target_counts @ self.eigvecs
+        self.background_proj = background_counts @ self.eigvecs
 
         # Loadings
         self.loadings = self.eigvecs * np.sqrt(self.eigvals)
