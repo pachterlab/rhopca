@@ -5,9 +5,9 @@ import warnings
 import matplotlib.pyplot as plt
 
 from .rhopca import rhoPCA
-from .utils import standardize_array, generalized_eigen
-from .utils_covariance import compute_covariance
-from .utils_plot import resolve_continuous_palette
+from ..utils import standardize_array, generalized_eigen
+from ..utils_covariance import compute_covariance
+from ..utils_plot import resolve_continuous_palette
 
 
 class kernelRhoPCA(rhoPCA):

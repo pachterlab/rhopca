@@ -4,9 +4,9 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
 
-from .utils import standardize_array, generalized_eigen
-from .utils_covariance import compute_covariance
-from .utils_plot import check_discrete, resolve_palette
+from ..utils import standardize_array, generalized_eigen
+from ..utils_covariance import compute_covariance
+from ..utils_plot import check_discrete, resolve_palette
 
 
 class rhoPCA:
