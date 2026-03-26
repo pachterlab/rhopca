@@ -4,7 +4,7 @@ import warnings
 
 import matplotlib.pyplot as plt
 
-from .core import rhoPCA
+from .rhopca import rhoPCA
 from .utils import standardize_array, generalized_eigen
 from .utils_covariance import compute_covariance
 from .utils_plot import resolve_continuous_palette
@@ -16,9 +16,6 @@ class kernelRhoPCA(rhoPCA):
 
     Extends :class:`rhoPCA` to support a spatial (or other pairwise) kernel
     applied to the target covariance, and optionally to the background.
-
-    Requires **two AnnData objects** — target and background — as positional
-    arguments.  
 
     Parameters
     ----------
@@ -103,7 +100,6 @@ class kernelRhoPCA(rhoPCA):
             if coordinates_key in adata_background.obsm else None
         )
 
-    # internal helpers ──────────────────────────────────────────────────────
 
     def _get_adata(self, which):
         """Return AnnData for 'target' or 'background'."""
@@ -113,11 +109,14 @@ class kernelRhoPCA(rhoPCA):
         """Return obs column values for 'target' or 'background'."""
         return self._get_adata(which).obs[column].values
 
+    @property
+    def _var_index(self):
+        return self.adata_target.var.index
+
     def _has_target_coordinates(self):
         """Return True when target AnnData has the coordinate key in .obsm."""
         return self._target_coords is not None
 
-    # fit ───────────────────────────────────────────────────────────────────
 
     def fit(self, *, method='schur', mu=None, bias=False, pdist_kwargs=None, **kernel_kwargs):
         """
@@ -194,24 +193,6 @@ class kernelRhoPCA(rhoPCA):
         self.loadings = self.eigvecs * np.sqrt(np.abs(self.eigvals))
 
 
-    def get_top_genes(self, *, component=1, n_genes=5):
-        """
-        Return the top ``n_genes`` contributing to a given component.
-
-        Parameters
-        ----------
-        component : int
-            Component index (1-based).
-        n_genes : int
-            Number of genes to return.
-        """
-        n_avail = self.loadings.shape[1]
-        if component > n_avail:
-            raise ValueError(f"component out of bounds, max is {n_avail}.")
-        scores = np.abs(self.loadings[:, component - 1])
-        idx = np.argsort(scores)[-n_genes:][::-1]
-        return list(self.adata_target.var.index[idx])
-
     def get_rhos(self, *, group_by=None):
         """
         Compute target-to-background variance ratios (rho) across all components.
@@ -252,7 +233,6 @@ class kernelRhoPCA(rhoPCA):
             columns=[f"GE {j + 1}" for j in range(n_components)],
         )
 
-    # ── plotting (kernel-specific) ────────────────────────────────────────────
     # _plot_scatter and _plot_hist are inherited from rhoPCA.
 
     def plot(self, plot_type='scatter', components=(1, 2), *,
@@ -265,7 +245,7 @@ class kernelRhoPCA(rhoPCA):
         ----------
         plot_type : {'scatter', 'hist', 'spatial'}, default ``'scatter'``
             Type of plot to produce.
-            ``'scatter'`` — side-by-side scatter of two generalized eigenvectors.
+            ``'scatter'`` — Scatter plot of two generalized eigenvectors.
             ``'hist'``    — KDE-smoothed histogram of one or more generalized
                             eigenvectors (one subplot per component).
             ``'spatial'`` — one spatial map per component (requires coordinates).
@@ -277,10 +257,9 @@ class kernelRhoPCA(rhoPCA):
             Column in ``.obs`` to color points / split histograms by
             (scatter and hist modes only; discrete columns only).
         palette : str or list
-            Seaborn palette for scatter/hist; colormap name for spatial.
+            Seaborn palette for scatter/hist or colormap name for spatial.
             Lists are accepted for scatter/hist and padded with ``Set2`` if
-            too short.  For spatial, a list triggers the default continuous
-            palette (``'viridis'``).
+            too short.
         """
         if plot_type == 'spatial':
             if not self._has_target_coordinates():

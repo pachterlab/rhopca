@@ -16,9 +16,6 @@ class rhoPCA:
     Accepts a single AnnData object and splits it into target and background
     using a column in ``.obs``.
 
-    Expression is zero-centered at construction time.  Set
-    ``scale_variance=True`` to also scale to unit variance.
-
     Parameters
     ----------
     adata : AnnData
@@ -69,8 +66,6 @@ class rhoPCA:
         self._target_X = adata[self.filt_target].X
         self._background_X = adata[self.filt_background].X
 
-    # ── internal helpers ──────────────────────────────────────────────────────
-
     def _get_adata(self, which):
         """Return the filtered AnnData view for 'target' or 'background'."""
         if which == 'target':
@@ -80,6 +75,10 @@ class rhoPCA:
     def _get_obs(self, which, column):
         """Return obs column values for 'target' or 'background'."""
         return self._get_adata(which).obs[column].values
+
+    @property
+    def _var_index(self):
+        return self.adata.var.index
 
     def fit(self, method='schur', mu=None, bias=False):
         """
@@ -130,7 +129,7 @@ class rhoPCA:
             )
         gene_scores = np.abs(self.loadings[:, component - 1])
         idx = np.argsort(gene_scores)[-n_genes:][::-1]
-        return list(self.adata.var.index[idx])
+        return list(self._var_index[idx])
 
     def get_rhos(self, group_by=None):
         """
@@ -222,12 +221,6 @@ class rhoPCA:
         """
         Scatter of two generalized eigenvectors with target and background
         overlaid in a single plot.
-
-        When ``color_by`` is ``None``, target and background use the first two
-        colors of *palette* (defaults to steelblue and tomato).  When
-        ``color_by`` is set, background is light gray and target points are
-        colored by *palette* categories (discrete columns only; defaults to
-        ``'tab10'``).
         """
         comp_x, comp_y = components[0], components[1]
         n_avail = self.loadings.shape[1]
@@ -300,7 +293,7 @@ class rhoPCA:
         to steelblue and tomato).
 
         When ``color_by`` is set, the grid is ``n_components × n_categories``:
-        each cell shows target and background filtered to one category value.
+        each subplot shows target and background filtered to one category value.
         Target is colored by *palette* (defaults to ``'tab10'``); background
         is light gray (discrete columns only).
 
