@@ -18,7 +18,7 @@ import scipy.sparse
 from scipy.spatial.distance import pdist as _pdist
 from numba import njit
 
-from .utils import squareform_from_condensed
+from .misc import squareform_from_condensed
 
 
 # kernel functions ──────────────────────────────────────────────────────────
