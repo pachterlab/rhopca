@@ -14,11 +14,10 @@ def standardize_array(X):
     Scale *X* to unit variance using ``sklearn.preprocessing.StandardScaler``
     with ``with_mean=False, with_std=True``.
 
-    Centering is deliberately omitted here; it is handled implicitly inside
+    Centering is omitted here since it is handled implicitly inside
     ``compute_covariance`` via the algebraic expansion of the covariance
-    formula.  Keeping mean-centering out of this step preserves sparsity:
-    sparse matrices are passed directly to ``StandardScaler`` without
-    densification.
+    formula.  This step preserves sparsity, and sparse matrices are passed 
+    directly to ``StandardScaler`` without densification.
 
     Parameters
     ----------
