@@ -1,3 +1,14 @@
 # Jupyter notebook checkpoints
 .ipynb_checkpoints/
 */.ipynb_checkpoints/
+
+# macOS
+.DS_Store
+
+# Python cache
+__pycache__/
+**/__pycache__/
+
+# YAML files
+*.yml
+*.yaml
