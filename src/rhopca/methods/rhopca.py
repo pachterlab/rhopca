@@ -205,6 +205,9 @@ class rhoPCA:
             to ``'tab10'``.  If a list is supplied that is too short, colors
             are padded from ``Set2``.
         """
+        if isinstance(components, int):
+            components = (components,)
+
         if plot_type == 'scatter':
             if len(components) < 2:
                 raise ValueError("plot_type='scatter' requires at least 2 components.")
@@ -274,8 +277,10 @@ class rhoPCA:
 
         all_x = np.concatenate([target_df[x_col].values, background_df[x_col].values])
         all_y = np.concatenate([target_df[y_col].values, background_df[y_col].values])
-        x_lim = (all_x.min(), all_x.max())
-        y_lim = (all_y.min(), all_y.max())
+        x_buf = 0.05 * (all_x.max() - all_x.min())
+        y_buf = 0.05 * (all_y.max() - all_y.min())
+        x_lim = (all_x.min() - x_buf, all_x.max() + x_buf)
+        y_lim = (all_y.min() - y_buf, all_y.max() + y_buf)
 
         ax_target.set_title(str(self.target_label), fontsize=14)
         ax_background.set_title(str(self.background_label), fontsize=14)
