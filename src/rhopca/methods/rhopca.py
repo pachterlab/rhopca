@@ -272,10 +272,17 @@ class rhoPCA:
                 color=pair[1], ax=ax_background, s=30, alpha=0.6,
             )
 
+        all_x = np.concatenate([target_df[x_col].values, background_df[x_col].values])
+        all_y = np.concatenate([target_df[y_col].values, background_df[y_col].values])
+        x_lim = (all_x.min(), all_x.max())
+        y_lim = (all_y.min(), all_y.max())
+
         ax_target.set_title(str(self.target_label), fontsize=14)
         ax_background.set_title(str(self.background_label), fontsize=14)
 
         for ax in (ax_target, ax_background):
+            ax.set_xlim(x_lim)
+            ax.set_ylim(y_lim)
             ax.grid(linestyle='--', color='lightgray', alpha=0.7)
             handles, labels = ax.get_legend_handles_labels()
             ax.legend(handles, labels, title=color_by, bbox_to_anchor=(1.02, 0.5),
