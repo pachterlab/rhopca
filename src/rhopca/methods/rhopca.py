@@ -100,21 +100,22 @@ class rhoPCA:
             n-1; ``True`` divides by n.  Passed to :func:`compute_covariance`.
         """
         self.method = method
+        self.verbose = verbose
 
         X_t = standardize_array(self._target_X) if self.scale_variance else self._target_X
         X_b = standardize_array(self._background_X) if self.scale_variance else self._background_X
 
-        if verbose: print("Computing target covariance...")
+        self._log("Covariance", "Computing target covariance...")
         Sigma_t = compute_covariance(X_t, bias=bias)
-        if verbose: print("Computing background covariance...")
+        self._log("Covariance", "Computing background covariance...")
         Sigma_b = compute_covariance(X_b, bias=bias)
-        if verbose: print("Covariance computation complete.")
+        self._log("Covariance", "Complete.")
 
-        if verbose: print("Computing generalized eigenvectors and eigenvalues...")
+        self._log("Eigendecomposition", "Computing generalized eigenvectors and eigenvalues...")
         self.eigvals, self.eigvecs = generalized_eigen(
             Sigma_t, Sigma_b, method=method, mu=mu, n_components=self.n_components
         )
-        if verbose: print("Eigendecomposition complete.")
+        self._log("Eigendecomposition", "Complete.")
 
         mu_t = np.asarray(X_t.mean(axis=0), dtype=np.float64).ravel()
         mu_b = np.asarray(X_b.mean(axis=0), dtype=np.float64).ravel()
