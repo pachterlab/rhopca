@@ -59,7 +59,6 @@ class kernelRhoPCA(rhoPCA):
             warnings.warn(
                 f"Gene sets do not match. Filtering to {len(common)} common genes "
                 f"({only_t} dropped from target, {only_b} dropped from background). "
-                f"Final gene set: {list(common)}"
             )
             adata_target = adata_target[:, common]
             adata_background = adata_background[:, common]
