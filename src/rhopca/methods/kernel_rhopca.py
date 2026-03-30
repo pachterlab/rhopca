@@ -51,6 +51,7 @@ class kernelRhoPCA(rhoPCA):
         scale_variance=False,
         n_components=None,
         radius_neighbors_kwargs=None,
+        use_radius_neighbors=True,
     ):
         # --- validate / align gene sets ---
         if not adata_target.var_names.equals(adata_background.var_names):
@@ -72,6 +73,7 @@ class kernelRhoPCA(rhoPCA):
         self.background_kernel = background_kernel
         self.n_components = n_components if n_components is not None else adata_target.shape[1]
         self.radius_neighbors_kwargs = radius_neighbors_kwargs
+        self.use_radius_neighbors = use_radius_neighbors
 
         # --- prompt for coordinates_key ---
         coordinates_key = coordinates_key if coordinates_key else 'spatial'
@@ -173,6 +175,7 @@ class kernelRhoPCA(rhoPCA):
             coordinates=target_coords,
             pdist_kwargs=pdist_kwargs,
             radius_neighbors_kwargs=self.radius_neighbors_kwargs,
+            use_radius_neighbors=self.use_radius_neighbors,
             **kernel_kwargs,
         )
         bg_kernel_str = kernel_str if self.background_kernel else "no kernel"
@@ -184,6 +187,7 @@ class kernelRhoPCA(rhoPCA):
             coordinates=background_coords,
             pdist_kwargs=pdist_kwargs,
             radius_neighbors_kwargs=self.radius_neighbors_kwargs,
+            use_radius_neighbors=self.use_radius_neighbors,
             **kernel_kwargs,
         )
         self._log("Covariance", "Complete.")
