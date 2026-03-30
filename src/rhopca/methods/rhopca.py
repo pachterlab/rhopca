@@ -80,7 +80,12 @@ class rhoPCA:
     def _var_index(self):
         return self.adata.var.index
 
-    def fit(self, method='schur', mu=None, bias=False):
+    def _log(self, step, message):
+        if self.verbose:
+            print("-" * 40)
+            print(f"\033[1m{step}\033[0m: {message}")
+
+    def fit(self, method='schur', mu=None, bias=False, verbose=False):
         """
         Compute generalized eigendecomposition of target vs background covariance.
 
@@ -99,12 +104,17 @@ class rhoPCA:
         X_t = standardize_array(self._target_X) if self.scale_variance else self._target_X
         X_b = standardize_array(self._background_X) if self.scale_variance else self._background_X
 
+        if verbose: print("Computing target covariance...")
         Sigma_t = compute_covariance(X_t, bias=bias)
+        if verbose: print("Computing background covariance...")
         Sigma_b = compute_covariance(X_b, bias=bias)
+        if verbose: print("Covariance computation complete.")
 
+        if verbose: print("Computing generalized eigenvectors and eigenvalues...")
         self.eigvals, self.eigvecs = generalized_eigen(
             Sigma_t, Sigma_b, method=method, mu=mu, n_components=self.n_components
         )
+        if verbose: print("Eigendecomposition complete.")
 
         mu_t = np.asarray(X_t.mean(axis=0), dtype=np.float64).ravel()
         mu_b = np.asarray(X_b.mean(axis=0), dtype=np.float64).ravel()
