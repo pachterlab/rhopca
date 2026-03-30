@@ -213,6 +213,8 @@ def compute_covariance(
     coordinates=None,
     distances=None,
     pdist_kwargs=None,
+    radius_neighbors_kwargs=None,
+    use_radius_neighbors=True,
     **kernel_kwargs,
 ):
     """
@@ -245,6 +247,20 @@ def compute_covariance(
     pdist_kwargs : dict, optional
         Keyword arguments forwarded to ``scipy.spatial.distance.pdist`` when
         computing distances from *coordinates*.  Defaults to Euclidean.
+        Only used when ``use_radius_neighbors=False`` or n_obs < 100,000.
+    radius_neighbors_kwargs : dict, optional
+        Keyword arguments forwarded to
+        ``sklearn.neighbors.radius_neighbors_graph``.  Defaults to
+        ``radius=100, mode='distance'``.  Any keys supplied here override
+        the defaults.  Only used when ``use_radius_neighbors=True``.
+    use_radius_neighbors : bool, default True
+        When ``True``, a sparse weight matrix is built via
+        ``sklearn.neighbors.radius_neighbors_graph`` instead of computing
+        all pairwise distances with ``scipy.spatial.distance.pdist``.
+        The sparse path is triggered automatically when n_obs >= 100,000,
+        or immediately when *radius_neighbors_kwargs* is supplied.
+        Set to ``False`` to always compute all pairwise distances regardless
+        of dataset size.
     **kernel_kwargs
         Passed to the kernel function (e.g. ``bandwidth``, ``buffer``).
 
@@ -261,21 +277,38 @@ def compute_covariance(
         return _cov_dense_standard(np.asarray(X, dtype=np.float64), bias=bias)
 
     # kernel-weighted covariance
-    if distances is None:
-        if coordinates is None:
-            raise ValueError("Supply `coordinates` or `distances` when using a kernel.")
-        kw = pdist_kwargs or {}
-        distances = _pdist(np.asarray(coordinates, dtype=np.float64), **kw)
+    if coordinates is None and distances is None:
+        raise ValueError("Supply `coordinates` or `distances` when using a kernel.")
 
-    weights = apply_kernel(distances, kernel, **kernel_kwargs)
-    W = squareform_from_condensed(np.ascontiguousarray(weights, dtype=np.float64))
+    use_radius = use_radius_neighbors and (
+        (radius_neighbors_kwargs is not None) or (X.shape[0] >= 100_000)
+    )
 
-    if kernel == 'gaussian' or kernel == 'inverse_distance':
-        np.fill_diagonal(W, 1.0)
+    if use_radius and coordinates is not None:
+        from sklearn.neighbors import radius_neighbors_graph
+        coords = np.asarray(coordinates, dtype=np.float64)
+        rn_kw = {'radius': 100, 'mode': 'distance'}
+        rn_kw.update(radius_neighbors_kwargs or {})
+        W = radius_neighbors_graph(coords, **rn_kw)
+        W = W.astype(np.float64)
+        W.data[:] = apply_kernel(W.data, kernel, **kernel_kwargs)
+        W = W.tolil()
+        W.setdiag(1.0)
+        W = W.tocsr()
+    else:
+        if distances is None:
+            kw = pdist_kwargs or {}
+            distances = _pdist(np.asarray(coordinates, dtype=np.float64), **kw)
+        weights = apply_kernel(distances, kernel, **kernel_kwargs)
+        W = squareform_from_condensed(np.ascontiguousarray(weights, dtype=np.float64))
+        if kernel == 'gaussian' or kernel == 'inverse_distance':
+            np.fill_diagonal(W, 1.0)
+        W = np.ascontiguousarray(W, dtype=np.float64)
 
-    W = np.ascontiguousarray(W, dtype=np.float64)
-
-    if is_sparse:
+    if scipy.sparse.issparse(W):
         return _cov_sparse_kernel(X, W, bias=bias)
 
-    return _cov_dense_kernel(np.ascontiguousarray(X, dtype=np.float64), W, bias=bias)
+    return _cov_dense_kernel(
+        np.ascontiguousarray(X.toarray() if is_sparse else X, dtype=np.float64),
+        W, bias=bias
+    )
