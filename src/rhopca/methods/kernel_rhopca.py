@@ -50,6 +50,7 @@ class kernelRhoPCA(rhoPCA):
         background_kernel=False,
         scale_variance=False,
         n_components=None,
+        radius_neighbors_kwargs=None,
     ):
         # --- validate / align gene sets ---
         if not adata_target.var_names.equals(adata_background.var_names):
@@ -70,20 +71,13 @@ class kernelRhoPCA(rhoPCA):
         self.scale_variance = scale_variance
         self.background_kernel = background_kernel
         self.n_components = n_components if n_components is not None else adata_target.shape[1]
+        self.radius_neighbors_kwargs = radius_neighbors_kwargs
 
         # --- prompt for coordinates_key ---
-        # if coordinates_key is None:
-        #     available = list(adata_target.obsm.keys())
-        #     if available:
-        #         print(f"Available .obsm keys in target: {available}")
-        #     val = input("Enter coordinates key (default 'spatial'): ").strip()
         coordinates_key = coordinates_key if coordinates_key else 'spatial'
         self.coordinates_key = coordinates_key
 
         # --- prompt for kernel ---
-        # if kernel is None:
-        #     print(f"Built-in kernels: {_BUILTIN_KERNELS}. Pass a callable for custom kernels.")
-        #     val = input("Enter kernel name (or press Enter for no kernel): ").strip()
         kernel = kernel if kernel else 'gaussian'
         self.kernel = kernel
 
@@ -119,7 +113,7 @@ class kernelRhoPCA(rhoPCA):
         return self._target_coords is not None
 
 
-    def fit(self, *, method='schur', mu=None, bias=False, pdist_kwargs=None, **kernel_kwargs):
+    def fit(self, *, method='schur', mu=None, bias=False, verbose=False, pdist_kwargs=None, **kernel_kwargs):
         """
         Compute the (kernel-weighted) generalized eigendecomposition.
 
@@ -143,6 +137,7 @@ class kernelRhoPCA(rhoPCA):
             *callable*             — any kwargs accepted by your function.
         """
         self.method = method
+        self.verbose = verbose
 
         X_t = standardize_array(self._target_X) if self.scale_variance else self._target_X
         X_b = standardize_array(self._background_X) if self.scale_variance else self._background_X
@@ -166,26 +161,38 @@ class kernelRhoPCA(rhoPCA):
             else None
         )
 
+        kernel_str = (
+            f"kernel='{self.kernel}'" + (f", {kernel_kwargs}" if kernel_kwargs else "")
+            if self.kernel is not None else "no kernel"
+        )
+        self._log("Covariance", f"Computing target covariance ({kernel_str})...")
         Sigma_t = compute_covariance(
             X_t,
             kernel=self.kernel,
             bias=bias,
             coordinates=target_coords,
             pdist_kwargs=pdist_kwargs,
+            radius_neighbors_kwargs=self.radius_neighbors_kwargs,
             **kernel_kwargs,
         )
+        bg_kernel_str = kernel_str if self.background_kernel else "no kernel"
+        self._log("Covariance", f"Computing background covariance ({bg_kernel_str})...")
         Sigma_b = compute_covariance(
             X_b,
             kernel=self.kernel if self.background_kernel else None,
             bias=bias,
             coordinates=background_coords,
             pdist_kwargs=pdist_kwargs,
+            radius_neighbors_kwargs=self.radius_neighbors_kwargs,
             **kernel_kwargs,
         )
+        self._log("Covariance", "Complete.")
 
+        self._log("Eigendecomposition", "Computing generalized eigenvectors and eigenvalues...")
         self.eigvals, self.eigvecs = generalized_eigen(
             Sigma_t, Sigma_b, method=method, mu=mu, n_components=self.n_components
         )
+        self._log("Eigendecomposition", "Complete.")
 
         mu_t = np.asarray(X_t.mean(axis=0), dtype=np.float64).ravel()
         mu_b = np.asarray(X_b.mean(axis=0), dtype=np.float64).ravel()
