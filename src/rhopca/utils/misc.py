@@ -99,9 +99,6 @@ def squareform_from_condensed(condensed):
     """
     Convert a condensed distance vector to a symmetric square matrix.
 
-    Uses a closed-form row-offset so every element is assigned by exactly
-    one thread — no race conditions under ``parallel=True``.  Diagonal is zero.
-
     Parameters
     ----------
     condensed : 1-D float64 array
