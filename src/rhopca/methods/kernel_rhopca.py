@@ -51,16 +51,18 @@ class kernelRhoPCA(rhoPCA):
         scale_variance=False,
         n_components=None,
     ):
-        # --- validate gene sets ---
+        # --- validate / align gene sets ---
         if not adata_target.var_names.equals(adata_background.var_names):
-            only_t = set(adata_target.var_names) - set(adata_background.var_names)
-            only_b = set(adata_background.var_names) - set(adata_target.var_names)
-            lines = ["Gene sets of the two AnnData objects do not match."]
-            if only_t:
-                lines.append(f"  {len(only_t)} gene(s) only in target.")
-            if only_b:
-                lines.append(f"  {len(only_b)} gene(s) only in background.")
-            raise ValueError("\n".join(lines))
+            common = adata_target.var_names.intersection(adata_background.var_names)
+            only_t = len(adata_target.var_names) - len(common)
+            only_b = len(adata_background.var_names) - len(common)
+            warnings.warn(
+                f"Gene sets do not match. Filtering to {len(common)} common genes "
+                f"({only_t} dropped from target, {only_b} dropped from background). "
+                f"Final gene set: {list(common)}"
+            )
+            adata_target = adata_target[:, common]
+            adata_background = adata_background[:, common]
 
         self.adata_target = adata_target
         self.adata_background = adata_background
@@ -302,6 +304,7 @@ class kernelRhoPCA(rhoPCA):
                 f"{self.target_label} — GE {comp}", fontsize=12
             )
             axes[0, col].set_aspect('equal')
+            axes[0, col].invert_yaxis()
             axes[0, col].axis('off')
             plt.colorbar(sc, ax=axes[0, col], shrink=0.7)
 
@@ -316,6 +319,7 @@ class kernelRhoPCA(rhoPCA):
                     f"{self.background_label} — GE {comp}", fontsize=12
                 )
                 axes[1, col].set_aspect('equal')
+                axes[1, col].invert_yaxis()
                 axes[1, col].axis('off')
                 plt.colorbar(sc2, ax=axes[1, col], shrink=0.7)
 
