@@ -219,8 +219,8 @@ class rhoPCA:
 
     def _plot_scatter(self, components, *, color_by=None, palette=None):
         """
-        Scatter of two generalized eigenvectors with target and background
-        overlaid in a single plot.
+        Scatter of two generalized eigenvectors in side-by-side target and
+        background plots.
         """
         comp_x, comp_y = components[0], components[1]
         n_avail = self.loadings.shape[1]
@@ -230,56 +230,56 @@ class rhoPCA:
         x_col = f"GE {comp_x}"
         y_col = f"GE {comp_y}"
 
-        background_df = pd.DataFrame({
-            x_col: self.background_proj[:, comp_x - 1],
-            y_col: self.background_proj[:, comp_y - 1],
-        })
         target_df = pd.DataFrame({
             x_col: self.target_proj[:, comp_x - 1],
             y_col: self.target_proj[:, comp_y - 1],
         })
+        background_df = pd.DataFrame({
+            x_col: self.background_proj[:, comp_x - 1],
+            y_col: self.background_proj[:, comp_y - 1],
+        })
 
-        fig, ax = plt.subplots(figsize=(6, 5))
+        fig, (ax_target, ax_background) = plt.subplots(1, 2, figsize=(12, 5))
 
         if color_by is not None:
-            # color_by provided: background is light gray, target colored by category
             t_vals = self._get_obs('target', color_by)
+            b_vals = self._get_obs('background', color_by)
             check_discrete(t_vals, color_by)
             target_df[color_by] = t_vals
-            categories = pd.Categorical(t_vals).categories
+            background_df[color_by] = b_vals
+            categories = pd.Categorical(np.concatenate([t_vals, b_vals])).categories
             cat_colors = resolve_palette(palette or 'tab10', len(categories))
             scatter_palette = dict(zip(categories, cat_colors))
 
             sns.scatterplot(
-                data=background_df, x=x_col, y=y_col,
-                color='lightgray', ax=ax, s=30, alpha=0.6,
-                label=str(self.background_label),
-            )
-            sns.scatterplot(
                 data=target_df, x=x_col, y=y_col,
                 hue=color_by, palette=scatter_palette,
-                ax=ax, s=40, alpha=0.8,
+                ax=ax_target, s=40, alpha=0.8,
             )
-        else:
-            # no color_by: use first two palette colors, defaulting to steelblue/tomato
-            pair = resolve_palette(palette, 2) if palette is not None else ['steelblue', 'tomato']
             sns.scatterplot(
                 data=background_df, x=x_col, y=y_col,
-                color=pair[0], ax=ax, s=30, alpha=0.6,
-                label=str(self.background_label),
+                hue=color_by, palette=scatter_palette,
+                ax=ax_background, s=30, alpha=0.6,
             )
+        else:
+            pair = resolve_palette(palette, 2) if palette is not None else ['steelblue', 'tomato']
             sns.scatterplot(
                 data=target_df, x=x_col, y=y_col,
-                color=pair[1], ax=ax, s=40, alpha=0.8,
-                label=str(self.target_label),
+                color=pair[0], ax=ax_target, s=40, alpha=0.8,
+            )
+            sns.scatterplot(
+                data=background_df, x=x_col, y=y_col,
+                color=pair[1], ax=ax_background, s=30, alpha=0.6,
             )
 
-        ax.set_title(f"{self.target_label} vs {self.background_label}", fontsize=14)
-        ax.grid(linestyle='--', color='lightgray', alpha=0.7)
+        ax_target.set_title(str(self.target_label), fontsize=14)
+        ax_background.set_title(str(self.background_label), fontsize=14)
 
-        handles, labels = ax.get_legend_handles_labels()
-        ax.legend(handles, labels, title=color_by, bbox_to_anchor=(1.02, 0.5),
-                  loc='center left')
+        for ax in (ax_target, ax_background):
+            ax.grid(linestyle='--', color='lightgray', alpha=0.7)
+            handles, labels = ax.get_legend_handles_labels()
+            ax.legend(handles, labels, title=color_by, bbox_to_anchor=(1.02, 0.5),
+                      loc='center left')
 
         plt.tight_layout()
         plt.show()
