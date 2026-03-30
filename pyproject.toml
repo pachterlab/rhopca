@@ -19,7 +19,9 @@ dependencies = [
     "matplotlib>=3.7",
     "seaborn>=0.12",
     "anndata>=0.9",
-    "numba>=0.56"
+    "numba>=0.56",
+    "scikit-learn>=1.0",
+    "pandas>=1.5"
 ]
 
 [project.urls]
