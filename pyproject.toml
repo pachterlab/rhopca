@@ -7,8 +7,8 @@ name = "rhopca"
 version = "1.0.0"
 description = "Target vs background variance dimensionality reduction for single-cell analyses."
 authors = [
-    { name = "Maria T. Carilli", email = "mcarilli@caltech.edu" }
-     { name = "Kayla C. Jackson", email = "kaylajac@caltech.edu" }
+    { name = "Maria T. Carilli", email = "mcarilli@caltech.edu" },
+    { name = "Kayla C. Jackson", email = "kaylajac@caltech.edu" }
 ]
 readme = "README.md"
 license = { file = "LICENSE" }
