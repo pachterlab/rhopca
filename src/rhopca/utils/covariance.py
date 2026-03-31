@@ -166,6 +166,7 @@ def _cov_sparse_kernel(X, W, bias=False):
     -------
     cov : (p, p) float64 ndarray
     """
+    print("Debug: Kernel weighted covariance for sparse matrix")
     n = X.shape[0]
     dof = n if bias else n - 1
     mu = np.asarray(X.mean(axis=0), dtype=np.float64).ravel()
@@ -174,7 +175,8 @@ def _cov_sparse_kernel(X, W, bias=False):
     S_W = w.sum()
 
     WX = (X.T.dot(W.T)).T                  # (n, p) dense
-    XtWX = np.asarray(X.T.dot(WX))                   # (p, p) dense
+    # XtWX = np.asarray(X.T.dot(WX))                   # (p, p) dense
+    XtWX = (X.T.dot(WX)).toarray()                   # (p, p) dense
 
     correction = np.outer(Xw, mu) + np.outer(mu, Xw) - S_W * np.outer(mu, mu)
     return (XtWX - correction) / dof
@@ -293,11 +295,11 @@ def compute_covariance(
         rn_kw = {'radius': 100, 'mode': 'distance'}
         rn_kw.update(radius_neighbors_kwargs or {})
         W = radius_neighbors_graph(coords, **rn_kw)
-        W = W.astype(np.float64)
-        W.data[:] = apply_kernel(W.data, kernel, **kernel_kwargs)
-        W = W.tolil()
+        # W = W.astype(np.float64)
+
+        W.data = apply_kernel(W.data, kernel, **kernel_kwargs)
         W.setdiag(1.0)
-        W = W.tocsr()
+
     else:
         if distances is None:
             kw = pdist_kwargs or {}
