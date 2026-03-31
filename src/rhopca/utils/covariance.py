@@ -286,6 +286,7 @@ def compute_covariance(
 
     if use_radius and coordinates is not None:
         from sklearn.neighbors import radius_neighbors_graph
+        
         coords = np.asarray(coordinates, dtype=np.float64)
         rn_kw = {'radius': 100, 'mode': 'distance'}
         rn_kw.update(radius_neighbors_kwargs or {})
