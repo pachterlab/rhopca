@@ -166,7 +166,7 @@ def _cov_sparse_kernel(X, W, bias=False):
     -------
     cov : (p, p) float64 ndarray
     """
-    print("Debug: Kernel weighted covariance for sparse matrix")
+    
     n = X.shape[0]
     dof = n if bias else n - 1
     mu = np.asarray(X.mean(axis=0), dtype=np.float64).ravel()
