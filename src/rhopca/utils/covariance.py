@@ -88,7 +88,8 @@ def apply_kernel(distances, kernel, **kernel_kwargs):
         return np.asarray(kernel(distances, **kernel_kwargs), dtype=np.float64)
 
     if kernel == 'gaussian':
-        return gaussian_kernel(distances, kernel_kwargs.get('bandwidth', 1.0))
+        bw = np.sqrt(np.median(distances))
+        return gaussian_kernel(distances, kernel_kwargs.get('bandwidth',bw))
 
     if kernel == 'inverse_distance':
         return inverse_distance_kernel(distances, kernel_kwargs.get('buffer', 1e-6))
@@ -286,7 +287,7 @@ def compute_covariance(
 
     if use_radius and coordinates is not None:
         from sklearn.neighbors import radius_neighbors_graph
-        
+
         coords = np.asarray(coordinates, dtype=np.float64)
         rn_kw = {'radius': 100, 'mode': 'distance'}
         rn_kw.update(radius_neighbors_kwargs or {})
