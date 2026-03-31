@@ -121,6 +121,7 @@ def _cov_sparse_standard(X, bias=False):
     dof = n if bias else n - 1
     mu = np.asarray(X.mean(axis=0), dtype=np.float64).ravel()
     XtX = X.T.dot(X)
+
     if scipy.sparse.issparse(XtX):
         XtX = XtX.toarray()
     return (np.asarray(XtX, dtype=np.float64) - n * np.outer(mu, mu)) / dof
@@ -170,9 +171,9 @@ def _cov_sparse_kernel(X, W, bias=False):
     mu = np.asarray(X.mean(axis=0), dtype=np.float64).ravel()
     w = W.sum(axis=1)                                # (n,)
     Xw = np.asarray(X.T.dot(w)).ravel()              # (p,)
-    S_W = float(w.sum())
+    S_W = w.sum()
 
-    WX = np.asarray(X.T.dot(W.T)).T                  # (n, p) dense
+    WX = (X.T.dot(W.T)).T                  # (n, p) dense
     XtWX = np.asarray(X.T.dot(WX))                   # (p, p) dense
 
     correction = np.outer(Xw, mu) + np.outer(mu, Xw) - S_W * np.outer(mu, mu)
