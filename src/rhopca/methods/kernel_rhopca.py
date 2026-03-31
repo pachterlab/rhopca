@@ -200,10 +200,14 @@ class kernelRhoPCA(rhoPCA):
 
         mu_t = np.asarray(X_t.mean(axis=0), dtype=np.float64).ravel()
         mu_b = np.asarray(X_b.mean(axis=0), dtype=np.float64).ravel()
+
+        self._log("Projecting", "...")
         self.target_proj = np.asarray(X_t @ self.eigvecs) - mu_t @ self.eigvecs
         self.background_proj = np.asarray(X_b @ self.eigvecs) - mu_b @ self.eigvecs
-        self.loadings = self.eigvecs * np.sqrt(np.abs(self.eigvals))
 
+        self._log("", "Finished computing projections.")
+        self.loadings = self.eigvecs * np.sqrt(np.abs(self.eigvals))
+        
 
     def get_rhos(self, *, group_by=None):
         """
