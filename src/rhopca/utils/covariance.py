@@ -141,10 +141,12 @@ def _cov_dense_standard(X, bias=False):
     -------
     cov : (p, p) float64 ndarray
     """
-    n = X.shape[0]
-    dof = n if bias else n - 1
-    mu = X.mean(axis=0)
-    return (X.T @ X - n * np.outer(mu, mu)) / dof
+    # n = X.shape[0]
+    # dof = n if bias else n - 1
+    # mu = X.mean(axis=0)
+    # return (X.T @ X - n * np.outer(mu, mu)) / dof
+
+    return np.cov(X.T, bias=bias)
 
 
 def _cov_sparse_kernel(X, W, bias=False):
