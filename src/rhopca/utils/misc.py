@@ -31,7 +31,7 @@ def standardize_array(X):
     return StandardScaler(with_mean=False, with_std=True).fit_transform(X)
 
 
-def generalized_eigen(Sigma_t, Sigma_b, *, method='schur', mu=None, n_components=None):
+def generalized_eigen(Sigma_t, Sigma_b=None, *, method='schur', mu=None, n_components=None):
     """
     Generalized eigendecomposition of *Sigma_t* w.r.t. *Sigma_b*.
 
@@ -42,8 +42,9 @@ def generalized_eigen(Sigma_t, Sigma_b, *, method='schur', mu=None, n_components
     ----------
     Sigma_t : (p, p) ndarray
         Target covariance matrix.
-    Sigma_b : (p, p) ndarray
-        Background covariance matrix.
+    Sigma_b : (p, p) ndarray or None
+        Background covariance matrix.  When ``None``, the identity matrix is
+        assumed and a standard eigendecomposition of *Sigma_t* is performed.
     method : {'schur', 'tikhonov'}, default ``'schur'``
         Fallback solver used when *Sigma_b* is not positive definite.
         ``'schur'``    — generalized Schur decomposition (``scipy.linalg.eig``).
@@ -59,22 +60,25 @@ def generalized_eigen(Sigma_t, Sigma_b, *, method='schur', mu=None, n_components
     eigvals : (k,) float64 ndarray
     eigvecs : (p, k) float64 ndarray
     """
-    try:
-        eigvals, eigvecs = eigh(Sigma_t, Sigma_b)
+    if Sigma_b is None:
+        eigvals, eigvecs = eigh(Sigma_t)
+    else:
+        try:
+            eigvals, eigvecs = eigh(Sigma_t, Sigma_b)
 
-    except np.linalg.LinAlgError:
-        warnings.warn(
-            "Background covariance is not positive definite; "
-            f"falling back to method='{method}'."
-        )
-        if method == 'schur':
-            eigvals, eigvecs = eig(Sigma_t, Sigma_b)
-        elif method == 'tikhonov':
-            if mu is None:
-                mu = 1e-6 * np.trace(Sigma_b) / Sigma_b.shape[0]
-            eigvals, eigvecs = eigh(Sigma_t, Sigma_b + mu * np.eye(Sigma_b.shape[0]))
-        else:
-            raise ValueError(f"Unknown method '{method}'. Use 'schur' or 'tikhonov'.")
+        except np.linalg.LinAlgError:
+            warnings.warn(
+                "Background covariance is not positive definite; "
+                f"falling back to method='{method}'."
+            )
+            if method == 'schur':
+                eigvals, eigvecs = eig(Sigma_t, Sigma_b)
+            elif method == 'tikhonov':
+                if mu is None:
+                    mu = 1e-6 * np.trace(Sigma_b) / Sigma_b.shape[0]
+                eigvals, eigvecs = eigh(Sigma_t, Sigma_b + mu * np.eye(Sigma_b.shape[0]))
+            else:
+                raise ValueError(f"Unknown method '{method}'. Use 'schur' or 'tikhonov'.")
 
     eigvals = np.real(eigvals)
     eigvecs = np.real(eigvecs)
