@@ -66,6 +66,11 @@ class rhoPCA:
         self._target_X = adata[self.filt_target].X
         self._background_X = adata[self.filt_background].X
 
+    @property
+    def target_only(self):
+        """``True`` when no background projection is available."""
+        return False
+
     def _get_adata(self, which):
         """Return the filtered AnnData view for 'target' or 'background'."""
         if which == 'target':
@@ -233,8 +238,10 @@ class rhoPCA:
 
     def _plot_scatter(self, components, *, color_by=None, palette=None):
         """
-        Scatter of two generalized eigenvectors in side-by-side target and
-        background plots.
+        Scatter of two generalized eigenvectors.
+
+        When ``self.target_only`` is ``True``, a single target panel is shown.
+        Otherwise target and background are shown side-by-side.
         """
         comp_x, comp_y = components[0], components[1]
         n_avail = self.loadings.shape[1]
@@ -248,20 +255,28 @@ class rhoPCA:
             x_col: self.target_proj[:, comp_x - 1],
             y_col: self.target_proj[:, comp_y - 1],
         })
-        background_df = pd.DataFrame({
-            x_col: self.background_proj[:, comp_x - 1],
-            y_col: self.background_proj[:, comp_y - 1],
-        })
 
-        fig, (ax_target, ax_background) = plt.subplots(1, 2, figsize=(12, 5))
+        if self.target_only:
+            fig, ax_target = plt.subplots(1, 1, figsize=(6, 5))
+            axes = [ax_target]
+        else:
+            background_df = pd.DataFrame({
+                x_col: self.background_proj[:, comp_x - 1],
+                y_col: self.background_proj[:, comp_y - 1],
+            })
+            fig, (ax_target, ax_background) = plt.subplots(1, 2, figsize=(12, 5))
+            axes = [ax_target, ax_background]
 
         if color_by is not None:
             t_vals = self._get_obs('target', color_by)
-            b_vals = self._get_obs('background', color_by)
             check_discrete(t_vals, color_by)
             target_df[color_by] = t_vals
-            background_df[color_by] = b_vals
-            categories = pd.Categorical(np.concatenate([t_vals, b_vals])).categories
+            if self.target_only:
+                categories = pd.Categorical(t_vals).categories
+            else:
+                b_vals = self._get_obs('background', color_by)
+                background_df[color_by] = b_vals
+                categories = pd.Categorical(np.concatenate([t_vals, b_vals])).categories
             cat_colors = resolve_palette(palette or 'tab10', len(categories))
             scatter_palette = dict(zip(categories, cat_colors))
 
@@ -270,33 +285,38 @@ class rhoPCA:
                 hue=color_by, palette=scatter_palette,
                 ax=ax_target, s=40, alpha=0.8,
             )
-            sns.scatterplot(
-                data=background_df, x=x_col, y=y_col,
-                hue=color_by, palette=scatter_palette,
-                ax=ax_background, s=30, alpha=0.6,
-            )
+            if not self.target_only:
+                sns.scatterplot(
+                    data=background_df, x=x_col, y=y_col,
+                    hue=color_by, palette=scatter_palette,
+                    ax=ax_background, s=30, alpha=0.6,
+                )
         else:
             pair = resolve_palette(palette, 2) if palette is not None else ['steelblue', 'tomato']
             sns.scatterplot(
                 data=target_df, x=x_col, y=y_col,
                 color=pair[0], ax=ax_target, s=40, alpha=0.8,
             )
-            sns.scatterplot(
-                data=background_df, x=x_col, y=y_col,
-                color=pair[1], ax=ax_background, s=30, alpha=0.6,
-            )
+            if not self.target_only:
+                sns.scatterplot(
+                    data=background_df, x=x_col, y=y_col,
+                    color=pair[1], ax=ax_background, s=30, alpha=0.6,
+                )
 
-        all_x = np.concatenate([target_df[x_col].values, background_df[x_col].values])
-        all_y = np.concatenate([target_df[y_col].values, background_df[y_col].values])
+        if self.target_only:
+            all_x, all_y = target_df[x_col].values, target_df[y_col].values
+        else:
+            all_x = np.concatenate([target_df[x_col].values, background_df[x_col].values])
+            all_y = np.concatenate([target_df[y_col].values, background_df[y_col].values])
+
         x_buf = 0.05 * (all_x.max() - all_x.min())
         y_buf = 0.05 * (all_y.max() - all_y.min())
         x_lim = (all_x.min() - x_buf, all_x.max() + x_buf)
         y_lim = (all_y.min() - y_buf, all_y.max() + y_buf)
 
-        ax_target.set_title(str(self.target_label), fontsize=14)
-        ax_background.set_title(str(self.background_label), fontsize=14)
-
-        for ax in (ax_target, ax_background):
+        titles = [str(self.target_label)] if self.target_only else [str(self.target_label), str(self.background_label)]
+        for ax, title in zip(axes, titles):
+            ax.set_title(title, fontsize=14)
             ax.set_xlim(x_lim)
             ax.set_ylim(y_lim)
             ax.grid(linestyle='--', color='lightgray', alpha=0.7)
@@ -352,20 +372,21 @@ class rhoPCA:
                 for col, (ct, color) in enumerate(zip(cts, cat_colors)):
                     ax = axes[row, col]
                     filt_t = self._get_obs('target', color_by) == ct
-                    filt_b = self._get_obs('background', color_by) == ct
-
                     t = self.target_proj[filt_t, comp - 1]
-                    b = self.background_proj[filt_b, comp - 1]
-                    rho = np.var(t) / np.var(b) if np.var(b) > 0 else np.nan
 
-                    sns.histplot(b, kde=True, color='lightgray', stat='density',
-                                 ax=ax, alpha=0.6, label=str(self.background_label))
+                    if self.target_only:
+                        ax.set_title(f"GE {comp} — {ct}")
+                    else:
+                        filt_b = self._get_obs('background', color_by) == ct
+                        b = self.background_proj[filt_b, comp - 1]
+                        rho = np.var(t) / np.var(b) if np.var(b) > 0 else np.nan
+                        sns.histplot(b, kde=True, color='lightgray', stat='density',
+                                     ax=ax, alpha=0.6, label=str(self.background_label))
+                        ax.set_title(f"GE {comp} — {ct}\n" + r"$\rho$ = " + f"{rho:.3f}")
+
                     sns.histplot(t, kde=True, color=color, stat='density',
                                  ax=ax, alpha=0.6, label=str(self.target_label))
 
-                    ax.set_title(
-                        f"GE {comp} — {ct}\n" + r"$\rho$ = " + f"{rho:.3f}"
-                    )
                     ax.grid(alpha=0.2)
                     ax.spines['top'].set_visible(False)
                     ax.spines['right'].set_visible(False)
@@ -380,15 +401,19 @@ class rhoPCA:
             for row, comp in enumerate(components):
                 ax = axes[row, 0]
                 t = self.target_proj[:, comp - 1]
-                b = self.background_proj[:, comp - 1]
-                rho = np.var(t) / np.var(b) if np.var(b) > 0 else np.nan
+
+                if self.target_only:
+                    ax.set_title(f"GE {comp} distribution")
+                else:
+                    b = self.background_proj[:, comp - 1]
+                    rho = np.var(t) / np.var(b) if np.var(b) > 0 else np.nan
+                    sns.histplot(b, kde=True, color=pair[1], stat='density',
+                                 ax=ax, alpha=0.6, label=str(self.background_label))
+                    ax.set_title(f"GE {comp} distribution\n" + r"$\rho$ = " + f"{rho:.3f}")
 
                 sns.histplot(t, kde=True, color=pair[0], stat='density',
                              ax=ax, alpha=0.6, label=str(self.target_label))
-                sns.histplot(b, kde=True, color=pair[1], stat='density',
-                             ax=ax, alpha=0.6, label=str(self.background_label))
 
-                ax.set_title(f"GE {comp} distribution\n" + r"$\rho$ = " + f"{rho:.3f}")
                 ax.grid(alpha=0.2)
                 ax.spines['top'].set_visible(False)
                 ax.spines['right'].set_visible(False)
