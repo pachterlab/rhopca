@@ -62,7 +62,7 @@ def inverse_distance_kernel(distances, buffer=1e-6):
     return 1.0 / (distances + buffer)
 
 
-def apply_kernel(distances, kernel, **kernel_kwargs):
+def apply_kernel(distances, kernel, kernel_kwargs=None):
     """
     Apply a kernel function to a condensed distance vector.
 
@@ -75,24 +75,25 @@ def apply_kernel(distances, kernel, **kernel_kwargs):
         ``'inverse_distance'`` — inverse-distance kernel; accepts ``buffer`` kwarg.
         *callable*             — any function with signature
                                  ``f(distances: ndarray, **kwargs) -> ndarray``.
-    **kernel_kwargs
+    kernel_kwargs : dict, optional
         Passed to the kernel function.
 
     Returns
     -------
     weights : 1-D float64 array
     """
+    kw = kernel_kwargs or {}
     distances = np.ascontiguousarray(distances, dtype=np.float64)
 
     if callable(kernel):
-        return np.asarray(kernel(distances, **kernel_kwargs), dtype=np.float64)
+        return np.asarray(kernel(distances, **kw), dtype=np.float64)
 
     if kernel == 'gaussian':
         bw = np.sqrt(np.median(distances))
-        return gaussian_kernel(distances, kernel_kwargs.get('bandwidth',bw))
+        return gaussian_kernel(distances, kw.get('bandwidth', bw))
 
     if kernel == 'inverse_distance':
-        return inverse_distance_kernel(distances, kernel_kwargs.get('buffer', 1e-6))
+        return inverse_distance_kernel(distances, kw.get('buffer', 1e-6))
 
     raise ValueError(
         f"Unknown kernel '{kernel}'. "
@@ -221,7 +222,7 @@ def compute_covariance(
     pdist_kwargs=None,
     radius_neighbors_kwargs=None,
     use_radius_neighbors=True,
-    **kernel_kwargs,
+    kernel_kwargs=None,
 ):
     """
     Compute a standard or kernel-weighted covariance matrix.
@@ -267,8 +268,9 @@ def compute_covariance(
         or immediately when *radius_neighbors_kwargs* is supplied.
         Set to ``False`` to always compute all pairwise distances regardless
         of dataset size.
-    **kernel_kwargs
-        Passed to the kernel function (e.g. ``bandwidth``, ``buffer``).
+    kernel_kwargs : dict, optional
+        Passed to the kernel function (e.g. ``{'bandwidth': 2.0}``,
+        ``{'buffer': 1e-6}``).
 
     Returns
     -------
@@ -299,14 +301,14 @@ def compute_covariance(
         W = radius_neighbors_graph(coords, **rn_kw)
         # W = W.astype(np.float64)
 
-        W.data = apply_kernel(W.data, kernel, **kernel_kwargs)
+        W.data = apply_kernel(W.data, kernel, kernel_kwargs=kernel_kwargs)
         W.setdiag(1.0)
 
     else:
         if distances is None:
             kw = pdist_kwargs or {}
             distances = _pdist(np.asarray(coordinates, dtype=np.float64), **kw)
-        weights = apply_kernel(distances, kernel, **kernel_kwargs)
+        weights = apply_kernel(distances, kernel, kernel_kwargs=kernel_kwargs)
         W = squareform_from_condensed(np.ascontiguousarray(weights, dtype=np.float64))
         if kernel == 'gaussian' or kernel == 'inverse_distance':
             np.fill_diagonal(W, 1.0)
