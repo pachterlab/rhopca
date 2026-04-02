@@ -51,15 +51,15 @@ class kernelRhoPCA(rhoPCA):
         adata_background,
         *,
         coordinates_key=None,
+        scale_variance=False,
+        n_components=None,
         kernel=None,
         kernel_kwargs=None,
         background_kernel=False,
-        scale_variance=False,
-        n_components=None,
-        radius_neighbors_kwargs=None,
         use_radius_neighbors=True,
+        radius_neighbors_kwargs=None
     ):
-        self.identity_background = adata_background == "Identity"
+        self.identity_background = isinstance(adata_background, str) and adata_background == "Identity"
 
         # --- validate / align gene sets ---
         if not self.identity_background:
