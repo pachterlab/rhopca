@@ -21,9 +21,11 @@ class kernelRhoPCA(rhoPCA):
     ----------
     adata_target : AnnData
         Target group expression data.
-    adata_background : AnnData
+    adata_background : AnnData or ``'Identity'``
         Background group expression data.  Must share the same gene set as
-        ``adata_target``.
+        ``adata_target``.  Pass ``'Identity'`` to use the identity matrix as the
+        background covariance, which reduces the method to a standard
+        eigendecomposition of the (kernel-weighted) target covariance.
     coordinates_key : str, optional
         Key in ``.obsm`` holding spatial (or other) coordinates used to compute
         pairwise distances for the kernel.  Prompted if not provided.
@@ -31,7 +33,10 @@ class kernelRhoPCA(rhoPCA):
         Kernel to apply when computing the target covariance.
         Built-in options: ``'gaussian'``, ``'inverse_distance'``.
         A callable ``f(distances, **kwargs) -> weights`` is also accepted.
-        Prompted if not provided
+        Pass ``None`` to use a standard (unweighted) covariance.
+    kernel_kwargs : dict, optional
+        Parameters forwarded to the kernel function
+        (e.g. ``{'bandwidth': 2.0}`` for ``'gaussian'``).
     background_kernel : bool, default False
         Apply ``kernel`` to the background covariance as well.
     scale_variance : bool, default False
@@ -47,23 +52,27 @@ class kernelRhoPCA(rhoPCA):
         *,
         coordinates_key=None,
         kernel=None,
+        kernel_kwargs=None,
         background_kernel=False,
         scale_variance=False,
         n_components=None,
         radius_neighbors_kwargs=None,
         use_radius_neighbors=True,
     ):
+        self.identity_background = adata_background == "Identity"
+
         # --- validate / align gene sets ---
-        if not adata_target.var_names.equals(adata_background.var_names):
-            common = adata_target.var_names.intersection(adata_background.var_names)
-            only_t = len(adata_target.var_names) - len(common)
-            only_b = len(adata_background.var_names) - len(common)
-            warnings.warn(
-                f"Gene sets do not match. Filtering to {len(common)} common genes "
-                f"({only_t} dropped from target, {only_b} dropped from background). "
-            )
-            adata_target = adata_target[:, common]
-            adata_background = adata_background[:, common]
+        if not self.identity_background:
+            if not adata_target.var_names.equals(adata_background.var_names):
+                common = adata_target.var_names.intersection(adata_background.var_names)
+                only_t = len(adata_target.var_names) - len(common)
+                only_b = len(adata_background.var_names) - len(common)
+                warnings.warn(
+                    f"Gene sets do not match. Filtering to {len(common)} common genes "
+                    f"({only_t} dropped from target, {only_b} dropped from background). "
+                )
+                adata_target = adata_target[:, common]
+                adata_background = adata_background[:, common]
 
         self.adata_target = adata_target
         self.adata_background = adata_background
@@ -74,29 +83,42 @@ class kernelRhoPCA(rhoPCA):
         self.n_components = n_components if n_components is not None else adata_target.shape[1]
         self.radius_neighbors_kwargs = radius_neighbors_kwargs
         self.use_radius_neighbors = use_radius_neighbors
+        self.kernel_kwargs = kernel_kwargs or {}
 
         # --- prompt for coordinates_key ---
         coordinates_key = coordinates_key if coordinates_key else 'spatial'
         self.coordinates_key = coordinates_key
 
         # --- prompt for kernel ---
-        kernel = kernel if kernel else 'gaussian'
+        if kernel is None:
+            warnings.warn(
+                "kernel=None: no kernel will be applied to the target covariance. "
+                "Pass kernel='gaussian' or another kernel to enable kernel weighting."
+            )
         self.kernel = kernel
 
         # Store raw expression; scaling (if requested) happens in fit()
         self._target_X = adata_target.X
-        self._background_X = adata_background.X
+        self._background_X = None if self.identity_background else adata_background.X
 
         # --- store spatial coordinates (None if key is absent) ---
         self._target_coords = (
             np.asarray(adata_target.obsm[coordinates_key], dtype=np.float64)
             if coordinates_key in adata_target.obsm else None
         )
-        self._background_coords = (
-            np.asarray(adata_background.obsm[coordinates_key], dtype=np.float64)
-            if coordinates_key in adata_background.obsm else None
-        )
+        if self.identity_background:
+            self._background_coords = None
+        else:
+            self._background_coords = (
+                np.asarray(adata_background.obsm[coordinates_key], dtype=np.float64)
+                if coordinates_key in adata_background.obsm else None
+            )
 
+
+    @property
+    def target_only(self):
+        """``True`` when ``adata_background='Identity'`` (no background projection)."""
+        return self.identity_background
 
     def _get_adata(self, which):
         """Return AnnData for 'target' or 'background'."""
@@ -115,7 +137,7 @@ class kernelRhoPCA(rhoPCA):
         return self._target_coords is not None
 
 
-    def fit(self, *, method='schur', mu=None, bias=False, verbose=False, pdist_kwargs=None, **kernel_kwargs):
+    def fit(self, *, method='schur', mu=None, bias=False, verbose=False, pdist_kwargs=None):
         """
         Compute the (kernel-weighted) generalized eigendecomposition.
 
@@ -123,26 +145,22 @@ class kernelRhoPCA(rhoPCA):
         ----------
         method : {'schur', 'tikhonov'}, default ``'schur'``
             Fallback solver when the background covariance is singular.
+            Ignored when ``adata_background='Identity'``.
         mu : float, optional
             Ridge for Tikhonov regularization.  Defaults to
             ``1e-6 · trace(Σ_b) / n_features``.
+            Ignored when ``adata_background='Identity'``.
         bias : bool, default False
             Normalization for covariance estimation.  ``False`` divides by
             n-1; ``True`` divides by n.  Passed to :func:`compute_covariance`.
         pdist_kwargs : dict, optional
             Keyword arguments forwarded to ``scipy.spatial.distance.pdist``
             when computing pairwise distances from coordinates.
-        **kernel_kwargs
-            Passed to the kernel function.
-            ``'gaussian'``         — ``bandwidth`` (float, default 1.0).
-            ``'inverse_distance'`` — ``buffer`` (float, default 1e-6).
-            *callable*             — any kwargs accepted by your function.
         """
         self.method = method
         self.verbose = verbose
 
         X_t = standardize_array(self._target_X) if self.scale_variance else self._target_X
-        X_b = standardize_array(self._background_X) if self.scale_variance else self._background_X
 
         # Warn if kernel requested but coordinates are missing
         if self.kernel is not None and self._target_coords is None:
@@ -157,14 +175,9 @@ class kernelRhoPCA(rhoPCA):
             )
 
         target_coords = self._target_coords if self.kernel is not None else None
-        background_coords = (
-            self._background_coords
-            if (self.kernel is not None and self.background_kernel)
-            else None
-        )
 
         kernel_str = (
-            f"kernel='{self.kernel}'" + (f", {kernel_kwargs}" if kernel_kwargs else "")
+            f"kernel='{self.kernel}'" + (f", {self.kernel_kwargs}" if self.kernel_kwargs else "")
             if self.kernel is not None else "no kernel"
         )
         self._log("Covariance", f"Computing target covariance ({kernel_str})...")
@@ -176,34 +189,50 @@ class kernelRhoPCA(rhoPCA):
             pdist_kwargs=pdist_kwargs,
             radius_neighbors_kwargs=self.radius_neighbors_kwargs,
             use_radius_neighbors=self.use_radius_neighbors,
-            **kernel_kwargs,
+            kernel_kwargs=self.kernel_kwargs,
         )
-        bg_kernel_str = kernel_str if self.background_kernel else "no kernel"
-        self._log("Covariance", f"Computing background covariance ({bg_kernel_str})...")
-        Sigma_b = compute_covariance(
-            X_b,
-            kernel=self.kernel if self.background_kernel else None,
-            bias=bias,
-            coordinates=background_coords,
-            pdist_kwargs=pdist_kwargs,
-            radius_neighbors_kwargs=self.radius_neighbors_kwargs,
-            use_radius_neighbors=self.use_radius_neighbors,
-            **kernel_kwargs,
-        )
+
+        if self.identity_background:
+            self._log("Covariance", "Background is Identity — skipping background covariance.")
+            Sigma_b = None
+        else:
+            X_b = standardize_array(self._background_X) if self.scale_variance else self._background_X
+            background_coords = (
+                self._background_coords
+                if (self.kernel is not None and self.background_kernel)
+                else None
+            )
+            bg_kernel_str = kernel_str if self.background_kernel else "no kernel"
+            self._log("Covariance", f"Computing background covariance ({bg_kernel_str})...")
+            Sigma_b = compute_covariance(
+                X_b,
+                kernel=self.kernel if self.background_kernel else None,
+                bias=bias,
+                coordinates=background_coords,
+                pdist_kwargs=pdist_kwargs,
+                radius_neighbors_kwargs=self.radius_neighbors_kwargs,
+                use_radius_neighbors=self.use_radius_neighbors,
+                kernel_kwargs=self.kernel_kwargs,
+            )
+
         self._log("Covariance", "Complete.")
 
-        self._log("Eigendecomposition", "Computing generalized eigenvectors and eigenvalues...")
+        self._log("Eigendecomposition", "Computing eigenvectors and eigenvalues...")
         self.eigvals, self.eigvecs = generalized_eigen(
             Sigma_t, Sigma_b, method=method, mu=mu, n_components=self.n_components
         )
         self._log("Eigendecomposition", "Complete.")
 
         mu_t = np.asarray(X_t.mean(axis=0), dtype=np.float64).ravel()
-        mu_b = np.asarray(X_b.mean(axis=0), dtype=np.float64).ravel()
 
         self._log("Projecting", "...")
         self.target_proj = np.asarray(X_t @ self.eigvecs) - mu_t @ self.eigvecs
-        self.background_proj = np.asarray(X_b @ self.eigvecs) - mu_b @ self.eigvecs
+
+        if self.identity_background:
+            self.background_proj = None
+        else:
+            mu_b = np.asarray(X_b.mean(axis=0), dtype=np.float64).ravel()
+            self.background_proj = np.asarray(X_b @ self.eigvecs) - mu_b @ self.eigvecs
 
         self._log("", "Finished computing projections.")
         self.loadings = self.eigvecs * np.sqrt(np.abs(self.eigvals))
@@ -213,6 +242,10 @@ class kernelRhoPCA(rhoPCA):
         """
         Compute target-to-background variance ratios (rho) across all components.
 
+        When ``adata_background='Identity'``, there is no background projection
+        so rho is undefined.  The eigenvalues of the target covariance are
+        returned instead (``group_by`` is ignored).
+
         Parameters
         ----------
         group_by : str, optional
@@ -220,6 +253,15 @@ class kernelRhoPCA(rhoPCA):
             group is compared against the full background.
         """
         n_components = self.loadings.shape[1]
+        columns = [f"GE {j + 1}" for j in range(n_components)]
+
+        if self.target_only:
+            return pd.DataFrame(
+                data=self.eigvals[:n_components].reshape(1, -1),
+                index=['Eigenvalue'],
+                columns=columns,
+            )
+
 
         groups = (
             self.adata_target.obs[group_by].unique()
@@ -243,11 +285,7 @@ class kernelRhoPCA(rhoPCA):
                 where=b_var > 0,
             )
 
-        return pd.DataFrame(
-            data=rhos,
-            index=groups,
-            columns=[f"GE {j + 1}" for j in range(n_components)],
-        )
+        return pd.DataFrame(data=rhos, index=groups, columns=columns)
 
     # _plot_scatter and _plot_hist are inherited from rhoPCA.
 
