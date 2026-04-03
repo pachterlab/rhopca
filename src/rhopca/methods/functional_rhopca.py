@@ -263,6 +263,11 @@ class functionalRhoPCA(rhoPCA):
             )
             return
 
+        if plot_type == "hist":
+            components = (components,) if isinstance(components, int) else tuple(components)
+            self._plot_hist(components=components, palette=palette)
+            return
+
         super().plot(plot_type=plot_type, components=components, palette=palette)
 
     def _plot_scatter(self, components, *, color_by=None, palette=None):
@@ -296,24 +301,26 @@ class functionalRhoPCA(rhoPCA):
 
         pair = resolve_palette(palette, 2) if palette is not None else ["steelblue", "tomato"]
 
-        fig, (ax_target, ax_background) = plt.subplots(1, 2, figsize=(12, 5))
+        fig, ax = plt.subplots(1, 1, figsize=(7, 6))
         sns.scatterplot(
             data=target_df,
             x=x_col,
             y=y_col,
             color=pair[0],
-            ax=ax_target,
+            ax=ax,
             s=40,
             alpha=0.8,
+            label=str(self.target_label),
         )
         sns.scatterplot(
             data=background_df,
             x=x_col,
             y=y_col,
             color=pair[1],
-            ax=ax_background,
+            ax=ax,
             s=30,
             alpha=0.6,
+            label=str(self.background_label),
         )
 
         all_x = np.concatenate([target_df[x_col].values, background_df[x_col].values])
@@ -323,14 +330,65 @@ class functionalRhoPCA(rhoPCA):
         x_lim = (all_x.min() - x_buf, all_x.max() + x_buf)
         y_lim = (all_y.min() - y_buf, all_y.max() + y_buf)
 
-        for ax, title in zip(
-            [ax_target, ax_background],
-            [str(self.target_label), str(self.background_label)],
-        ):
-            ax.set_title(title, fontsize=14)
-            ax.set_xlim(x_lim)
-            ax.set_ylim(y_lim)
-            ax.grid(linestyle="--", color="lightgray", alpha=0.7)
+        ax.set_title(f"{x_col} vs {y_col}", fontsize=14)
+        ax.set_xlim(x_lim)
+        ax.set_ylim(y_lim)
+        ax.grid(linestyle="--", color="lightgray", alpha=0.7)
+        ax.legend()
+
+        plt.tight_layout()
+        plt.show()
+
+    def _plot_hist(self, components, color_by=None, palette=None):
+        """
+        Histogram/KDE plot of one or more eigenfunction scores.
+
+        ``color_by`` is intentionally unsupported for functional rhoPCA.
+        """
+        if color_by is not None:
+            raise ValueError("`color_by` is not supported for functionalRhoPCA histogram plots.")
+
+        n_avail = self.target_proj.shape[1]
+        for comp in components:
+            if comp > n_avail:
+                raise ValueError(f"GE index out of bounds (max={n_avail}).")
+
+        pair = resolve_palette(palette, 2) if palette is not None else ["steelblue", "tomato"]
+        n_comps = len(components)
+        fig, axes = plt.subplots(n_comps, 1, figsize=(6, 4 * n_comps), squeeze=False)
+
+        for row, comp in enumerate(components):
+            ax = axes[row, 0]
+            target_scores = self.target_proj[:, comp - 1]
+            background_scores = self.background_proj[:, comp - 1]
+
+            sns.histplot(
+                target_scores,
+                kde=True,
+                color=pair[0],
+                stat="density",
+                ax=ax,
+                alpha=0.45,
+                label=str(self.target_label),
+            )
+            sns.histplot(
+                background_scores,
+                kde=True,
+                color=pair[1],
+                stat="density",
+                ax=ax,
+                alpha=0.35,
+                label=str(self.background_label),
+            )
+
+            rho = np.var(target_scores, ddof=1) / np.var(background_scores, ddof=1)
+            ax.set_title(f"GE {comp} score distribution\n" + r"$\rho$ = " + f"{rho:.3f}")
+            ax.set_xlabel(f"GE {comp} score")
+            ax.set_ylabel("Density")
+            ax.grid(alpha=0.2)
+            ax.spines["top"].set_visible(False)
+            ax.spines["right"].set_visible(False)
+            ax.legend()
 
         plt.tight_layout()
         plt.show()
