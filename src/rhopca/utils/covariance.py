@@ -276,11 +276,11 @@ def compute_covariance(
     -------
     cov : (p, p) float64 ndarray
     """
-    is_sparse = scipy.sparse.issparse(X)
+    X_is_sparse = scipy.sparse.issparse(X)
 
     # standard covariance
     if kernel is None:
-        if is_sparse:
+        if X_is_sparse:
             return _cov_sparse_standard(X, bias=bias)
         return _cov_dense_standard(np.asarray(X, dtype=np.float64), bias=bias)
 
@@ -296,13 +296,15 @@ def compute_covariance(
         from sklearn.neighbors import radius_neighbors_graph
 
         coords = np.asarray(coordinates, dtype=np.float64)
-        rn_kw = {'radius': 100, 'mode': 'distance'}
+        rn_kw = {'radius': 500, 'mode': 'distance'}
         rn_kw.update(radius_neighbors_kwargs or {})
-        W = radius_neighbors_graph(coords, **rn_kw)
-        # W = W.astype(np.float64)
 
+        # Returns a sparse graph
+        W = radius_neighbors_graph(coords, **rn_kw)
         W.data = apply_kernel(W.data, kernel, kernel_kwargs=kernel_kwargs)
-        W.setdiag(1.0)
+
+        if kernel == 'gaussian' or kernel == 'inverse_distance':
+            W.setdiag(1.0)
 
     else:
         if distances is None:
@@ -310,14 +312,21 @@ def compute_covariance(
             distances = _pdist(np.asarray(coordinates, dtype=np.float64), **kw)
         weights = apply_kernel(distances, kernel, kernel_kwargs=kernel_kwargs)
         W = squareform_from_condensed(np.ascontiguousarray(weights, dtype=np.float64))
+        
         if kernel == 'gaussian' or kernel == 'inverse_distance':
             np.fill_diagonal(W, 1.0)
         W = np.ascontiguousarray(W, dtype=np.float64)
 
-    if scipy.sparse.issparse(W):
-        return _cov_sparse_kernel(X, W, bias=bias)
-
+    W_is_sparse = scipy.sparse.issparse(W)
+    if W_is_sparse:
+        if X_is_sparse:
+            return _cov_sparse_kernel(X, W, bias=bias)
+        else:
+            W = np.ascontiguousarray(W.toarray(), dtype=np.float64)
+            return _cov_dense_kernel(X, W) 
+    X_is_sparse:
+        X = X.toarray()
     return _cov_dense_kernel(
-        np.ascontiguousarray(X.toarray() if is_sparse else X, dtype=np.float64),
+        np.ascontiguousarray(X, dtype=np.float64),
         W, bias=bias
     )
