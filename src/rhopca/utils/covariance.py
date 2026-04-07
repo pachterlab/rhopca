@@ -318,14 +318,16 @@ def compute_covariance(
         W = np.ascontiguousarray(W, dtype=np.float64)
 
     W_is_sparse = scipy.sparse.issparse(W)
-    if W_is_sparse:
-        if X_is_sparse:
-            return _cov_sparse_kernel(X, W, bias=bias)
-        else:
-            W = np.ascontiguousarray(W.toarray(), dtype=np.float64)
-            return _cov_dense_kernel(X, W) 
-    X_is_sparse:
+    
+    if W_is_sparse and X_is_sparse:
+        return _cov_sparse_kernel(X, W, bias=bias)
+    
+    
+    elif X_is_sparse:
+        # Here, W is dense, but X is sparse. Use dense_kernel method with numba
         X = X.toarray()
+    
+
     return _cov_dense_kernel(
         np.ascontiguousarray(X, dtype=np.float64),
         W, bias=bias
