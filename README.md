@@ -47,8 +47,8 @@ and
 
 
 ```bibtex
-@article {Carilli2026Rayleigh,
-    author = {Carilli, Maria and Jackson, Kayla and Pachter, Lior},
+@article {Jackson2026Rayleigh,
+    author = {Jackson, Kayla and Carilli, Maria and Pachter, Lior},
     title = {The Rayleigh Quotient and Contrastive Principal Component Analysis II},
     elocation-id = {},
     year = {2026},
