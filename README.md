@@ -50,11 +50,11 @@ and
 @article {Jackson2026Rayleigh,
     author = {Jackson, Kayla and Carilli, Maria and Pachter, Lior},
     title = {The Rayleigh Quotient and Contrastive Principal Component Analysis II},
-    elocation-id = {},
+    elocation-id = {2026.04.08.717236},
     year = {2026},
-    doi = {},
+    doi = {10.64898/2026.04.08.717236},
     publisher = {Cold Spring Harbor Laboratory},
-    URL = {},
+    URL = {https://www.biorxiv.org/content/10.64898/2026.04.08.717236v1},
     journal = {bioRxiv}
 }
 ```
