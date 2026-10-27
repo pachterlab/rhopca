@@ -12,3 +12,6 @@ __pycache__/
 # YAML files
 *.yml
 *.yaml
+
+# Local notes
+NOTES.md
