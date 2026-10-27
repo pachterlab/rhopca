@@ -481,8 +481,8 @@ class functionalRhoPCA(rhoPCA):
         whitened_t = A_t_centered @ chol
         whitened_b = A_b_centered @ chol
 
-        Sigma_t = compute_covariance(whitened_t)
-        Sigma_b = compute_covariance(whitened_b)
+        Sigma_t = compute_covariance(whitened_t, bias=bias)
+        Sigma_b = compute_covariance(whitened_b, bias=bias)
 
         self.eigvals, eigvecs_w = generalized_eigen(
             Sigma_t,
