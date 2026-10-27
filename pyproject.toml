@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "rhopca"
-version = "1.0.0"
+dynamic = ["version"]
 description = "Target vs background variance dimensionality reduction for single-cell analyses."
 authors = [
     { name = "Maria T. Carilli", email = "mcarilli@caltech.edu" },
@@ -28,6 +28,9 @@ dependencies = [
 [project.urls]
 Homepage = "https://github.com/pachterlab/rhopca"
 Issues = "https://github.com/pachterlab/rhopca/issues"
+
+[tool.setuptools.dynamic]
+version = { attr = "rhopca.__version__" }
 
 [tool.setuptools.packages.find]
 where = ["src"]
