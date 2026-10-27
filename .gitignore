@@ -2,6 +2,8 @@
 .ipynb_checkpoints/
 */.ipynb_checkpoints/
 
+examples/
+
 # macOS
 .DS_Store
 
