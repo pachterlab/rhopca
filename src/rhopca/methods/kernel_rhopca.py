@@ -6,7 +6,7 @@ import matplotlib.pyplot as plt
 
 from .rhopca import rhoPCA
 from ..utils.misc import standardize_array, generalized_eigen
-from ..utils.covariance import compute_covariance
+from ..utils.covariance import compute_covariance, weighted_covariance
 from ..utils.plotting import resolve_continuous_palette
 
 
@@ -31,12 +31,27 @@ class kernelRhoPCA(rhoPCA):
         pairwise distances for the kernel.  Prompted if not provided.
     kernel : str, callable, or None, optional
         Kernel to apply when computing the target covariance.
-        Built-in options: ``'gaussian'``, ``'inverse_distance'``.
+        Built-in options: ``'gaussian'``, ``'inverse_distance'``, ``'wendland'``.
+        The kernel should be positive semi-definite so that the weighted
+        covariance is PSD.
         A callable ``f(distances, **kwargs) -> weights`` is also accepted.
         Pass ``None`` to use a standard (unweighted) covariance.
     kernel_kwargs : dict, optional
-        Parameters forwarded to the kernel function
-        (e.g. ``{'bandwidth': 2.0}`` for ``'gaussian'``).
+        Kernel parameters:
+
+        * ``bandwidth`` — ``'gaussian'`` width σ: how quickly weights decay with
+          distance (never exactly zero).  Defaults to the median pairwise
+          distance, which is on the scale of the whole dataset.
+        * ``buffer`` — ``'inverse_distance'`` offset in ``1 / (d + buffer)``.
+        * ``support`` — distance beyond which weights are exactly zero.
+          Required for ``'wendland'``; optional for other kernels, which are
+          then tapered by a Wendland kernel.  Giving a support makes the
+          weight matrix sparse, which large datasets need; about
+          10 × bandwidth keeps a Gaussian close to its untapered shape.
+
+        With 100,000 or more cells and no ``support``, a Gaussian uses
+        ``support = 10 × bandwidth`` automatically (with a warning); other
+        kernels raise an error.
     background_kernel : bool, default False
         Apply ``kernel`` to the background covariance as well.
     scale_variance : bool, default False
@@ -56,8 +71,6 @@ class kernelRhoPCA(rhoPCA):
         kernel=None,
         kernel_kwargs=None,
         background_kernel=False,
-        use_radius_neighbors=True,
-        radius_neighbors_kwargs=None
     ):
         self.identity_background = isinstance(adata_background, str) and adata_background == "Identity"
 
@@ -81,8 +94,6 @@ class kernelRhoPCA(rhoPCA):
         self.scale_variance = scale_variance
         self.background_kernel = background_kernel
         self.n_components = n_components if n_components is not None else adata_target.shape[1]
-        self.radius_neighbors_kwargs = radius_neighbors_kwargs
-        self.use_radius_neighbors = use_radius_neighbors
         self.kernel_kwargs = kernel_kwargs or {}
 
         # --- prompt for coordinates_key ---
@@ -137,7 +148,8 @@ class kernelRhoPCA(rhoPCA):
         return self._target_coords is not None
 
 
-    def fit(self, *, method='schur', mu=None, bias=False, verbose=False, pdist_kwargs=None):
+    def fit(self, *, method='schur', mu=None, bias=False, normalize_by_weights=False,
+            verbose=False):
         """
         Compute the (kernel-weighted) generalized eigendecomposition.
 
@@ -153,12 +165,17 @@ class kernelRhoPCA(rhoPCA):
         bias : bool, default False
             Normalization for covariance estimation.  ``False`` divides by
             n-1; ``True`` divides by n.  Passed to :func:`compute_covariance`.
-        pdist_kwargs : dict, optional
-            Keyword arguments forwarded to ``scipy.spatial.distance.pdist``
-            when computing pairwise distances from coordinates.
+        normalize_by_weights : bool, default False
+            For kernel-weighted covariances, divide by ``S0 = Σ_ij W_ij`` (as in
+            Moran's I) instead of n-1 / n, controlling for the total weight in
+            ``W``.  Unweighted covariances (e.g. the background when
+            ``background_kernel=False``) still follow ``bias``.  Only rescales
+            the eigenvalues, loadings, and rhos; eigenvectors are unchanged.
         """
         self.method = method
         self.verbose = verbose
+        self.bias = bias
+        self.normalize_by_weights = normalize_by_weights
 
         X_t = standardize_array(self._target_X) if self.scale_variance else self._target_X
 
@@ -174,44 +191,40 @@ class kernelRhoPCA(rhoPCA):
                 "not found in background .obsm. Falling back to standard covariance."
             )
 
-        target_coords = self._target_coords if self.kernel is not None else None
+        target_kernel = self.kernel if self._target_coords is not None else None
+        use_background_kernel = self.background_kernel and self._background_coords is not None
 
         kernel_str = (
             f"kernel='{self.kernel}'" + (f", {self.kernel_kwargs}" if self.kernel_kwargs else "")
-            if self.kernel is not None else "no kernel"
+            if target_kernel is not None else "no kernel"
         )
         self._log("Covariance", f"Computing target covariance ({kernel_str})...")
-        Sigma_t = compute_covariance(
+        Sigma_t, self.W_target_ = compute_covariance(
             X_t,
-            kernel=self.kernel,
+            kernel=target_kernel,
             bias=bias,
-            coordinates=target_coords,
-            pdist_kwargs=pdist_kwargs,
-            radius_neighbors_kwargs=self.radius_neighbors_kwargs,
-            use_radius_neighbors=self.use_radius_neighbors,
+            normalize_by_weights=normalize_by_weights,
+            return_weights=True,
+            coordinates=self._target_coords if target_kernel is not None else None,
             kernel_kwargs=self.kernel_kwargs,
         )
 
         if self.identity_background:
             self._log("Covariance", "Background is Identity — skipping background covariance.")
             Sigma_b = None
+            self.W_background_ = None
         else:
             X_b = standardize_array(self._background_X) if self.scale_variance else self._background_X
-            background_coords = (
-                self._background_coords
-                if (self.kernel is not None and self.background_kernel)
-                else None
-            )
-            bg_kernel_str = kernel_str if self.background_kernel else "no kernel"
+            background_kernel = self.kernel if use_background_kernel else None
+            bg_kernel_str = kernel_str if background_kernel is not None else "no kernel"
             self._log("Covariance", f"Computing background covariance ({bg_kernel_str})...")
-            Sigma_b = compute_covariance(
+            Sigma_b, self.W_background_ = compute_covariance(
                 X_b,
-                kernel=self.kernel if self.background_kernel else None,
+                kernel=background_kernel,
                 bias=bias,
-                coordinates=background_coords,
-                pdist_kwargs=pdist_kwargs,
-                radius_neighbors_kwargs=self.radius_neighbors_kwargs,
-                use_radius_neighbors=self.use_radius_neighbors,
+                normalize_by_weights=normalize_by_weights,
+                return_weights=True,
+                coordinates=self._background_coords if background_kernel is not None else None,
                 kernel_kwargs=self.kernel_kwargs,
             )
 
@@ -241,6 +254,12 @@ class kernelRhoPCA(rhoPCA):
     def get_rhos(self, *, group_by=None):
         """
         Compute target-to-background variance ratios (rho) across all components.
+
+        Rho is the ratio that kernel rhoPCA maximizes: for component ``v``,
+        ``rho = vᵀ Σ_t^W v / vᵀ Σ_b v``, using the same weight matrices and
+        normalization (``bias``, ``normalize_by_weights``) as :meth:`fit`.
+        For the full target this equals the eigenvalues.  Per-group target
+        variances restrict ``W`` to the cells in that group.
 
         When ``adata_background='Identity'``, there is no background projection
         so rho is undefined.  The eigenvalues of the target covariance are
@@ -277,8 +296,8 @@ class kernelRhoPCA(rhoPCA):
                 if group_by is not None
                 else slice(None)
             )
-            t_var = np.var(self.target_proj[t_mask, :], axis=0, ddof=1)
-            b_var = np.var(self.background_proj, axis=0, ddof=1)
+            t_var = self._weighted_proj_var(self.target_proj, self.W_target_, t_mask)
+            b_var = self._weighted_proj_var(self.background_proj, self.W_background_)
             rhos[i, :] = np.divide(
                 t_var, b_var,
                 out=np.full_like(t_var, np.nan),
@@ -286,6 +305,19 @@ class kernelRhoPCA(rhoPCA):
             )
 
         return pd.DataFrame(data=rhos, index=groups, columns=columns)
+
+    def _weighted_proj_var(self, proj, W, mask=slice(None)):
+        """Per-component (kernel-weighted) variance of projections, as in fit."""
+        if W is not None and not isinstance(mask, slice):
+            idx = np.flatnonzero(mask)
+            W = W[idx][:, idx] if hasattr(W, 'tocsr') else W[np.ix_(idx, idx)]
+        cov = weighted_covariance(
+            proj[mask, :], W,
+            bias=self.bias,
+            normalize_by_weights=self.normalize_by_weights,
+            check_psd=False,
+        )
+        return np.diag(cov)
 
     # _plot_scatter and _plot_hist are inherited from rhoPCA.
 
