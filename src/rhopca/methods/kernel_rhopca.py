@@ -58,8 +58,9 @@ class kernelRhoPCA(rhoPCA):
         Apply ``kernel`` to the background covariance as well.
     scale_variance : bool, default False
         Scale expression to unit variance in addition to zero-centering.
-    n_components : int, optional
-        Number of generalized eigenvectors to retain.  Defaults to all valid components.
+    n_components : int or None, default 50
+        Number of generalized eigenvectors to retain.  ``None`` keeps all valid
+        components (memory for projections grows as n_obs x n_components).
     """
 
     def __init__(
@@ -69,7 +70,7 @@ class kernelRhoPCA(rhoPCA):
         *,
         coordinates_key=None,
         scale_variance=False,
-        n_components=None,
+        n_components=50,
         kernel=None,
         kernel_kwargs=None,
         background_kernel=False,
