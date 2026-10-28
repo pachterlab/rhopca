@@ -6,7 +6,9 @@ import matplotlib.pyplot as plt
 
 from .rhopca import rhoPCA
 from ..utils.misc import standardize_array, generalized_eigen
-from ..utils.covariance import compute_covariance, weighted_covariance
+from ..utils.covariance import (
+    DEFAULT_N_JOBS, _n_threads, compute_covariance, weighted_covariance,
+)
 from ..utils.plotting import resolve_continuous_palette
 
 
@@ -149,7 +151,7 @@ class kernelRhoPCA(rhoPCA):
 
 
     def fit(self, *, method='schur', mu=None, bias=False, normalize_by_weights=False,
-            verbose=False):
+            verbose=False, n_jobs=DEFAULT_N_JOBS):
         """
         Compute the (kernel-weighted) generalized eigendecomposition.
 
@@ -171,11 +173,17 @@ class kernelRhoPCA(rhoPCA):
             ``W``.  Unweighted covariances (e.g. the background when
             ``background_kernel=False``) still follow ``bias``.  Only rescales
             the eigenvalues, loadings, and rhos; eigenvectors are unchanged.
+        n_jobs : int, default 16
+            Number of threads for the neighbor search, kernel evaluation,
+            covariance products, eigendecomposition, and projections (and
+            later for :meth:`get_rhos`).  ``-1`` uses all cores.  Capped at
+            the number of cores available.
         """
         self.method = method
         self.verbose = verbose
         self.bias = bias
         self.normalize_by_weights = normalize_by_weights
+        self.n_jobs = n_jobs
 
         X_t = standardize_array(self._target_X) if self.scale_variance else self._target_X
 
@@ -205,6 +213,7 @@ class kernelRhoPCA(rhoPCA):
             bias=bias,
             normalize_by_weights=normalize_by_weights,
             return_weights=True,
+            n_jobs=n_jobs,
             coordinates=self._target_coords if target_kernel is not None else None,
             kernel_kwargs=self.kernel_kwargs,
         )
@@ -224,28 +233,30 @@ class kernelRhoPCA(rhoPCA):
                 bias=bias,
                 normalize_by_weights=normalize_by_weights,
                 return_weights=True,
+                n_jobs=n_jobs,
                 coordinates=self._background_coords if background_kernel is not None else None,
                 kernel_kwargs=self.kernel_kwargs,
             )
 
         self._log("Covariance", "Complete.")
 
-        self._log("Eigendecomposition", "Computing eigenvectors and eigenvalues...")
-        self.eigvals, self.eigvecs = generalized_eigen(
-            Sigma_t, Sigma_b, method=method, mu=mu, n_components=self.n_components
-        )
-        self._log("Eigendecomposition", "Complete.")
+        with _n_threads(n_jobs):
+            self._log("Eigendecomposition", "Computing eigenvectors and eigenvalues...")
+            self.eigvals, self.eigvecs = generalized_eigen(
+                Sigma_t, Sigma_b, method=method, mu=mu, n_components=self.n_components
+            )
+            self._log("Eigendecomposition", "Complete.")
 
-        mu_t = np.asarray(X_t.mean(axis=0), dtype=np.float64).ravel()
+            mu_t = np.asarray(X_t.mean(axis=0), dtype=np.float64).ravel()
 
-        self._log("Projecting", "...")
-        self.target_proj = np.asarray(X_t @ self.eigvecs) - mu_t @ self.eigvecs
+            self._log("Projecting", "...")
+            self.target_proj = np.asarray(X_t @ self.eigvecs) - mu_t @ self.eigvecs
 
-        if self.identity_background:
-            self.background_proj = None
-        else:
-            mu_b = np.asarray(X_b.mean(axis=0), dtype=np.float64).ravel()
-            self.background_proj = np.asarray(X_b @ self.eigvecs) - mu_b @ self.eigvecs
+            if self.identity_background:
+                self.background_proj = None
+            else:
+                mu_b = np.asarray(X_b.mean(axis=0), dtype=np.float64).ravel()
+                self.background_proj = np.asarray(X_b @ self.eigvecs) - mu_b @ self.eigvecs
 
         self._log("", "Finished computing projections.")
         self.loadings = self.eigvecs * np.sqrt(np.abs(self.eigvals))
@@ -315,7 +326,7 @@ class kernelRhoPCA(rhoPCA):
             proj[mask, :], W,
             bias=self.bias,
             normalize_by_weights=self.normalize_by_weights,
-            check_psd=False,
+            n_jobs=self.n_jobs,
         )
         return np.diag(cov)
 
