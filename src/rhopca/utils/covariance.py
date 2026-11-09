@@ -14,6 +14,10 @@ Kernel-weighted covariances are built in two steps:
    (all pairs).
 2. :func:`weighted_covariance` — computes ``(X - 1μᵀ)ᵀ W (X - 1μᵀ) / c``.
 
+:func:`grouped_weighted_variance` computes only the diagonal of that
+covariance, separately for each group of rows (W restricted to within-group
+pairs), in a single pass over W — used for per-group rho values.
+
 Dispatch pattern in :func:`weighted_covariance`:
 
 * ``W=None``,   sparse X  →  :func:`_cov_sparse_standard`
@@ -37,6 +41,7 @@ from contextlib import contextmanager
 
 import numba
 import numpy as np
+import scipy.fft
 import scipy.sparse
 from numba import njit, prange
 from scipy.sparse.csgraph import reverse_cuthill_mckee
@@ -85,7 +90,7 @@ _MAX_DENSE_OBS = 100_000
 # The Wendland taper then shrinks the effective bandwidth by only ~9%.
 _AUTO_SUPPORT_FACTOR = 10.0
 
-# Refuse to build a sparse W with more stored entries than this (~12 GB).
+# Refuse to build a sparse W with more stored entries than this (~8 GB).
 _MAX_SPARSE_NNZ = 1_000_000_000
 
 # Number of points subsampled to estimate the median distance (and the
@@ -95,6 +100,19 @@ _N_SUBSAMPLE = 2000
 # Number of gene columns processed at once in the sparse-W covariance.
 # Small blocks keep the neighbors' rows of each block in cache.
 _GENE_BLOCK = 64
+
+# Largest distance from the fitted lattice, as a fraction of the spacing, for
+# coordinates to count as a regular grid.
+_GRID_TOL = 0.05
+
+# Largest number of lattice sites per observation for the FFT path.
+_MAX_LATTICE_SITES_PER_OBS = 16
+
+# Number of columns transformed at once on the FFT path.
+_FFT_BLOCK = 16
+
+# Gaussian weights are below 1e-13 beyond this many bandwidths.
+_GAUSSIAN_REACH = 8.0
 
 
 @njit
@@ -371,7 +389,7 @@ def _check_nnz(nnz, n_obs, support):
     if nnz > _MAX_SPARSE_NNZ:
         raise ValueError(
             f"support={support:.4g} gives about {nnz / n_obs:.0f} neighbors per "
-            f"observation (~{nnz:.2g} stored weights, ~{nnz * 12 / 1e9:.0f} GB). "
+            f"observation (~{nnz:.2g} stored weights, ~{nnz * 8 / 1e9:.0f} GB). "
             "Use a smaller kernel_kwargs['support'] (or a smaller 'bandwidth' for "
             "'gaussian', which sets the automatic support)."
         )
@@ -408,7 +426,7 @@ def _radius_neighbors_grid(coords, radius):
     indptr = np.zeros(n + 1, dtype=index_dtype)
     np.cumsum(counts, out=indptr[1:])
     indices = np.empty(nnz, dtype=index_dtype)
-    distances = np.empty(nnz, dtype=np.float64)
+    distances = np.empty(nnz, dtype=np.float32)
     _grid_fill(coords, cell_idx, n_cells, strides, order, cell_start, offsets, r2,
                indptr, indices, distances)
     return indptr, indices, distances
@@ -433,7 +451,7 @@ def _radius_neighbors_fallback(coords, radius, n_jobs):
     counts = cKDTree(coords).query_ball_point(_subsample(coords), r=radius, return_length=True)
     _check_nnz(float(np.mean(counts)) * coords.shape[0], coords.shape[0], radius)
     G = radius_neighbors_graph(coords, radius=radius, mode='distance', n_jobs=n_jobs).tocsr()
-    return G.indptr, G.indices, np.ascontiguousarray(G.data, dtype=np.float64)
+    return G.indptr, G.indices, np.ascontiguousarray(G.data, dtype=np.float32)
 
 
 # weight matrix ─────────────────────────────────────────────────────────────
@@ -481,7 +499,7 @@ def build_weight_matrix(
 
     Returns
     -------
-    W : (n, n) float64 ndarray or scipy.sparse CSR matrix
+    W : (n, n) float64 ndarray or float32 scipy.sparse CSR matrix
     """
     if coordinates is None and distances is None:
         raise ValueError("Supply `coordinates` or `distances` when using a kernel.")
@@ -489,6 +507,12 @@ def build_weight_matrix(
     with _n_threads(n_jobs):
         return _build_weight_matrix(n_obs, kernel, coordinates, distances,
                                     dict(kernel_kwargs or {}), n_jobs)
+
+
+def _resolve_bandwidth(kernel, kw, coords):
+    """Fill in the default Gaussian bandwidth (subsampled median distance)."""
+    if kernel == 'gaussian' and 'bandwidth' not in kw:
+        kw['bandwidth'] = float(np.median(_pdist(_subsample(coords))))
 
 
 def _dense_from_condensed(weights, diag_value):
@@ -516,8 +540,8 @@ def _build_weight_matrix(n_obs, kernel, coordinates, distances, kw, n_jobs):
 
     # Resolve the default Gaussian bandwidth over all pairs (subsampled when
     # large), not just the pairs within the support.
-    if kernel == 'gaussian' and 'bandwidth' not in kw and ('support' in kw or large):
-        kw['bandwidth'] = float(np.median(_pdist(_subsample(coords))))
+    if 'support' in kw or large:
+        _resolve_bandwidth(kernel, kw, coords)
 
     if 'support' not in kw and large:
         if kernel != 'gaussian':
@@ -553,12 +577,185 @@ def _build_weight_matrix(n_obs, kernel, coordinates, distances, kw, n_jobs):
     else:
         _apply_kernel_inplace(values, kernel, kw)
 
+    values = values.astype(np.float32, copy=False)
     W = scipy.sparse.csr_matrix((values, indices, indptr), shape=(n_obs, n_obs))
     diag_value = _kernel_at_zero(kernel, kw)
     _warn_if_diagonal_dominates(diag_value, _max_offdiag(indptr, indices, values))
     if not self_included:
-        W = (W + scipy.sparse.diags(np.full(n_obs, diag_value), format='csr')).tocsr()
+        diagonal = np.full(n_obs, diag_value, dtype=np.float32)
+        W = (W + scipy.sparse.diags(diagonal, format='csr')).tocsr()
     return W
+
+
+# regular-grid weights ──────────────────────────────────────────────────────
+
+def _lattice_basis(coords):
+    """Estimate two lattice vectors and the spacing from neighbor offsets."""
+    query = _subsample(coords)
+    k = min(9, coords.shape[0])
+    _, nbrs = cKDTree(coords).query(query, k=k)
+    offsets = (coords[nbrs[:, 1:]] - query[:, None, :]).reshape(-1, 2)
+    norms = np.linalg.norm(offsets, axis=1)
+    if k < 3 or norms.min() == 0:
+        return None
+
+    spacing = float(np.median(norms.reshape(query.shape[0], -1).min(axis=1)))
+    first = offsets[norms <= 1.25 * spacing]
+    a = np.median(first[np.linalg.norm(first - first[0], axis=1) < 0.5 * spacing], axis=0)
+
+    cross = np.abs(a[0] * offsets[:, 1] - a[1] * offsets[:, 0])
+    apart = offsets[cross > 0.5 * np.linalg.norm(a) * norms]
+    if apart.shape[0] == 0:
+        return None
+    apart_norms = np.linalg.norm(apart, axis=1)
+    nearest = apart[apart_norms <= 1.25 * np.median(apart_norms[apart_norms <= 1.25 * apart_norms.min()])]
+    b = np.median(nearest[np.linalg.norm(nearest - nearest[0], axis=1) < 0.5 * spacing], axis=0)
+    return np.column_stack([a, b]), spacing
+
+
+def _detect_lattice(coords):
+    """
+    Fit a 2-D lattice to *coords*.
+
+    Returns ``(idx, basis)``, with ``idx`` the (n, 2) non-negative lattice
+    sites and ``basis`` the (2, 2) lattice vectors, or ``None`` if the
+    coordinates are not approximately a regular grid.
+    """
+    if coords.shape[1] != 2:
+        return None
+    found = _lattice_basis(coords)
+    if found is None:
+        return None
+    basis, spacing = found
+
+    # The basis is refined outward from the center so that a small error in
+    # the first estimate cannot accumulate into wrong sites far from it.
+    centered = coords - coords[np.argmin(((coords - np.median(coords, axis=0)) ** 2).sum(axis=1))]
+    dist = np.linalg.norm(centered, axis=1)
+    radius = 20.0 * spacing
+    while True:
+        idx = np.rint(np.linalg.solve(basis, centered.T).T)
+        inside = dist <= radius
+        design = np.column_stack([idx[inside], np.ones(inside.sum())])
+        if design.shape[0] < 3 or np.linalg.matrix_rank(design) < 3:
+            return None
+        coef = np.linalg.lstsq(design, centered[inside], rcond=None)[0]
+        basis = coef[:2].T
+        if inside.all():
+            break
+        radius *= 2.0
+
+    idx = np.rint(np.linalg.solve(basis, (centered - coef[2]).T).T).astype(np.int64)
+    residual = centered - idx @ basis.T - coef[2]
+    if np.sqrt((residual ** 2).sum(axis=1).max()) > _GRID_TOL * spacing:
+        return None
+
+    idx -= idx.min(axis=0)
+    shape = idx.max(axis=0) + 1
+    if np.unique(idx[:, 0] * shape[1] + idx[:, 1]).size != coords.shape[0]:
+        return None
+    if shape.prod() > _MAX_LATTICE_SITES_PER_OBS * coords.shape[0]:
+        return None
+    return idx, basis
+
+
+class _GridKernel:
+    """
+    Kernel weights on a lattice, applied by FFT without storing ``W``.
+
+    Parameters
+    ----------
+    idx : (n, 2) int array
+        Lattice sites from :func:`_detect_lattice`.
+    basis : (2, 2) float array
+        Lattice vectors.
+    kernel : str or callable
+        See :func:`apply_kernel`.
+    kw : dict
+        Kernel parameters, with the bandwidth resolved.
+    n_jobs : int
+        Number of FFT workers.
+    """
+
+    def __init__(self, idx, basis, kernel, kw, n_jobs):
+        self.rows, self.cols = idx[:, 0], idx[:, 1]
+        self.shape = (idx.shape[0], idx.shape[0])
+        self.workers = os.cpu_count() if n_jobs in (None, -1) else int(n_jobs)
+
+        sites = idx.max(axis=0) + 1
+        if 'support' in kw:
+            reach = float(kw['support'])
+        elif kernel == 'gaussian':
+            reach = _GAUSSIAN_REACH * float(kw['bandwidth'])
+        else:
+            reach = np.inf
+        per_axis = reach * np.linalg.norm(np.linalg.inv(basis), axis=1)
+        pad = np.minimum(np.ceil(np.nan_to_num(per_axis, posinf=sites.max())), sites - 1).astype(np.int64)
+        self.grid = tuple(scipy.fft.next_fast_len(int(s + p), real=True)
+                          for s, p in zip(sites, pad))
+
+        # Signed lattice offsets in FFT order; those beyond pad stay zero so
+        # that the circular convolution has no wrap-around.
+        steps = [np.arange(m) for m in self.grid]
+        for step, m in zip(steps, self.grid):
+            step[step > m // 2] -= m
+        d_row, d_col = np.meshgrid(*steps, indexing='ij')
+        offsets = np.stack([d_row, d_col], axis=-1) @ basis.T
+        weights = apply_kernel(np.linalg.norm(offsets, axis=-1), kernel, kw).reshape(self.grid)
+        weights[(np.abs(d_row) > pad[0]) | (np.abs(d_col) > pad[1])] = 0.0
+
+        origin = weights[0, 0]
+        weights[0, 0] = 0.0
+        _warn_if_diagonal_dominates(origin, weights.max())
+        weights[0, 0] = origin
+        self.spectrum = scipy.fft.rfft2(weights, workers=self.workers)
+        self._total = None
+
+    def matmat(self, Z, subset=None):
+        """
+        ``W @ Z``, or ``W[subset][:, subset] @ Z`` for ``subset`` row indices.
+        """
+        rows = self.rows if subset is None else self.rows[subset]
+        cols = self.cols if subset is None else self.cols[subset]
+        out = np.empty_like(Z)
+        for j0 in range(0, Z.shape[1], _FFT_BLOCK):
+            block = Z[:, j0:j0 + _FFT_BLOCK]
+            grid = np.zeros((block.shape[1],) + self.grid)
+            grid[:, rows, cols] = block.T
+            freq = scipy.fft.rfft2(grid, axes=(1, 2), workers=self.workers)
+            freq *= self.spectrum
+            grid = scipy.fft.irfft2(freq, s=self.grid, axes=(1, 2), workers=self.workers)
+            out[:, j0:j0 + _FFT_BLOCK] = grid[:, rows, cols].T
+        return out
+
+    def row_sums(self, subset=None):
+        """Row sums of ``W``, or of ``W[subset][:, subset]``."""
+        size = self.shape[0] if subset is None else len(subset)
+        return self.matmat(np.ones((size, 1)), subset).ravel()
+
+    def sum(self):
+        """Total weight ``S0``."""
+        if self._total is None:
+            self._total = float(self.row_sums().sum())
+        return self._total
+
+
+def _weight_operator(n_obs, *, kernel, coordinates, kernel_kwargs=None, n_jobs=DEFAULT_N_JOBS):
+    """
+    Weights for :func:`weighted_covariance`: a :class:`_GridKernel` for at
+    least ``_MAX_DENSE_OBS`` observations on a regular grid, otherwise the
+    matrix from :func:`build_weight_matrix`.
+    """
+    if n_obs >= _MAX_DENSE_OBS:
+        coords = np.ascontiguousarray(coordinates, dtype=np.float64)
+        lattice = _detect_lattice(coords)
+        if lattice is not None:
+            kw = dict(kernel_kwargs or {})
+            _resolve_bandwidth(kernel, kw, coords)
+            with _n_threads(n_jobs):
+                return _GridKernel(*lattice, kernel, kw, n_jobs)
+    return build_weight_matrix(n_obs, kernel=kernel, coordinates=coordinates,
+                               kernel_kwargs=kernel_kwargs, n_jobs=n_jobs)
 
 
 # covariance helpers ────────────────────────────────────────────────────────
@@ -579,7 +776,8 @@ def _cov_sparse_standard(X, bias=False):
     """
     n = X.shape[0]
     dof = n if bias else n - 1
-    mu = np.asarray(X.mean(axis=0), dtype=np.float64).ravel()
+    X = X.astype(np.float64, copy=False)
+    mu = _column_means(X)
     XtX = X.T.dot(X)
 
     if scipy.sparse.issparse(XtX):
@@ -607,6 +805,11 @@ def _cov_dense_standard(X, bias=False):
     # return (X.T @ X - n * np.outer(mu, mu)) / dof
 
     return np.atleast_2d(np.cov(X.T, bias=bias))
+
+
+def rcm_order(W):
+    """Reverse Cuthill-McKee row order of a symmetric sparse ``W`` (int64)."""
+    return reverse_cuthill_mckee(W.tocsr(), symmetric_mode=True).astype(np.int64)
 
 
 @njit(parallel=True)
@@ -669,15 +872,15 @@ def _cov_sparse_kernel(X, W, denom):
     cov : (p, p) float64 ndarray
     """
     W = W.tocsr()
-    data = np.ascontiguousarray(W.data, dtype=np.float64)
+    data = _sparse_values(W)
     p = X.shape[1]
 
-    mu = np.asarray(X.mean(axis=0), dtype=np.float64).ravel()
-    w = np.asarray(W.sum(axis=1), dtype=np.float64).ravel()   # (n,)
+    mu = _column_means(X)
+    w = W @ np.ones(W.shape[0])                                 # (n,)
     Xw = np.asarray(X.T @ w, dtype=np.float64).ravel()          # (p,)
     S_W = w.sum()
 
-    perm = reverse_cuthill_mckee(W, symmetric_mode=True).astype(np.int64)
+    perm = rcm_order(W)
     inv = np.empty_like(perm)
     inv[perm] = np.arange(perm.shape[0])
 
@@ -731,6 +934,68 @@ def _cov_dense_kernel(X, W, denom):
     return (XtWX - correction) / denom
 
 
+def _cov_grid_kernel(X, W, denom):
+    """
+    Kernel-weighted covariance for a :class:`_GridKernel` (X dense or sparse).
+
+    Parameters
+    ----------
+    X : (n, p) sparse matrix or float64 ndarray
+    W : _GridKernel
+    denom : float
+        Normalization constant (n-1, n, or S0).
+
+    Returns
+    -------
+    cov : (p, p) float64 ndarray
+    """
+    X_is_sparse = scipy.sparse.issparse(X)
+    if X_is_sparse:
+        X = X.tocsc().astype(np.float64, copy=False)
+    mu = _column_means(X)
+    p = X.shape[1]
+
+    cov = np.empty((p, p))
+    for j0 in range(0, p, _FFT_BLOCK):
+        j1 = min(j0 + _FFT_BLOCK, p)
+        block = X[:, j0:j1].toarray() if X_is_sparse else X[:, j0:j1]
+        WB = W.matmat(np.asarray(block, dtype=np.float64) - mu[j0:j1])
+        cov[:, j0:j1] = _xt_times(X, WB) - np.outer(mu, WB.sum(axis=0))
+    return (cov + cov.T) / (2.0 * denom)
+
+
+def _column_means(X):
+    """Column means of dense or sparse ``X``, summed in float64."""
+    if scipy.sparse.issparse(X):
+        return (X.T @ np.ones(X.shape[0])) / X.shape[0]
+    return X.mean(axis=0, dtype=np.float64)
+
+
+def _xt_times(X, B):
+    """``Xᵀ @ B`` for dense ``B``; ``X`` is float64 CSC when sparse."""
+    if scipy.sparse.issparse(X):
+        return _csc_t_matmat(X.indptr, X.indices, X.data, np.ascontiguousarray(B))
+    return X.T @ B
+
+
+def _sparse_values(W):
+    """Stored values of sparse ``W`` as floats, without copying them."""
+    if W.data.dtype in (np.float32, np.float64):
+        return W.data
+    return W.data.astype(np.float64)
+
+
+def _denominator(W, n, bias, normalize_by_weights):
+    if normalize_by_weights:
+        if scipy.sparse.issparse(W):
+            W = W @ np.ones(W.shape[0])     # sum in float64
+        denom = float(W.sum())
+        if denom <= 0:
+            raise ValueError(f"Sum of weights S0 = {denom:.3g} must be positive.")
+        return denom
+    return float(n if bias else n - 1)
+
+
 def weighted_covariance(X, W=None, *, bias=False, normalize_by_weights=False,
                         n_jobs=DEFAULT_N_JOBS):
     """
@@ -740,8 +1005,8 @@ def weighted_covariance(X, W=None, *, bias=False, normalize_by_weights=False,
     ----------
     X : (n, p) array-like — dense ndarray or scipy.sparse matrix
         Raw or scaled data matrix.  Centering is handled internally.
-    W : (n, n) ndarray, scipy.sparse matrix, or None
-        Symmetric weight matrix.  ``None`` is equivalent to the identity and
+    W : (n, n) ndarray, scipy.sparse matrix, _GridKernel, or None
+        Symmetric weights.  ``None`` is equivalent to the identity and
         returns the standard covariance.
     bias : bool, default False
         ``False`` divides by n-1 (sample covariance); ``True`` divides by n.
@@ -765,13 +1030,12 @@ def weighted_covariance(X, W=None, *, bias=False, normalize_by_weights=False,
                 return _cov_sparse_standard(X, bias=bias)
             return _cov_dense_standard(np.asarray(X, dtype=np.float64), bias=bias)
 
-        n = X.shape[0]
-        if normalize_by_weights:
-            denom = float(W.sum())
-            if denom <= 0:
-                raise ValueError(f"Sum of weights S0 = {denom:.3g} must be positive.")
-        else:
-            denom = float(n if bias else n - 1)
+        denom = _denominator(W, X.shape[0], bias, normalize_by_weights)
+
+        if isinstance(W, _GridKernel):
+            if not X_is_sparse:
+                X = np.asarray(X, dtype=np.float64)
+            return _cov_grid_kernel(X, W, denom)
 
         if scipy.sparse.issparse(W):
             if not X_is_sparse:
@@ -786,6 +1050,180 @@ def weighted_covariance(X, W=None, *, bias=False, normalize_by_weights=False,
             np.ascontiguousarray(W, dtype=np.float64),
             denom,
         )
+
+
+@njit(parallel=True)
+def _grouped_quadform_rows(indptr, indices, data, Pp, labels_p, perm, inv, qp, sp):
+    """
+    Per-row terms of ``diag(P_gᵀ W_gg P_g)`` for every group at once.
+
+    For row i in group g, ``q[i] = P[i] ∘ Σ_l W_il P[l]`` and
+    ``s[i] = Σ_l W_il``, summing only over neighbors l in the same group.
+    Rows are visited in the order ``perm`` (as in :func:`_csr_matmat_permuted`);
+    inputs ``Pp``, ``labels_p`` and outputs ``qp``, ``sp`` are in that order.
+    """
+    n, k = Pp.shape
+    for ii in prange(n):
+        i = perm[ii]
+        g = labels_p[ii]
+        acc = np.zeros(k)
+        wi = 0.0
+        for t in range(indptr[i], indptr[i + 1]):
+            jj = inv[indices[t]]
+            if labels_p[jj] == g:
+                w = data[t]
+                wi += w
+                for c in range(k):
+                    acc[c] += w * Pp[jj, c]
+        for c in range(k):
+            qp[ii, c] = Pp[ii, c] * acc[c]
+        sp[ii] = wi
+
+
+def _subspace_quadratic(X, U, W, *, bias=False, normalize_by_weights=False, order=None,
+                        n_jobs=DEFAULT_N_JOBS):
+    """
+    Compute ``Uᵀ (X - 1μᵀ)ᵀ W (X - 1μᵀ) U / c`` for a gene basis ``U``.
+
+    Parameters
+    ----------
+    X : (n, p) array-like — dense ndarray or scipy.sparse matrix
+    U : (p, k) float64 ndarray
+    W : (n, n) ndarray, scipy.sparse matrix, or _GridKernel
+    bias, normalize_by_weights : bool
+        Normalization ``c``, as in :func:`weighted_covariance`.
+    order : (n,) int array, optional
+        Row visiting order for sparse *W*, from :func:`rcm_order`.
+    n_jobs : int, default 16
+        Number of threads.  ``-1`` uses all cores.
+
+    Returns
+    -------
+    K : (k, k) float64 ndarray
+    """
+    with _n_threads(n_jobs):
+        n, k = X.shape[0], U.shape[1]
+        denom = _denominator(W, n, bias, normalize_by_weights)
+        mu = _column_means(X)
+        offset = mu @ U
+        if scipy.sparse.issparse(X):
+            X_t = X.tocsc().astype(np.float64, copy=False)
+        else:
+            X_t = np.asarray(X, dtype=np.float64)
+
+        sparse_W = scipy.sparse.issparse(W)
+        if sparse_W:
+            W = W.tocsr()
+            data = _sparse_values(W)
+            perm = rcm_order(W) if order is None else np.asarray(order, dtype=np.int64)
+            inv = np.empty_like(perm)
+            inv[perm] = np.arange(n)
+
+        K = np.empty((k, k))
+        for j0 in range(0, k, _GENE_BLOCK):
+            j1 = min(j0 + _GENE_BLOCK, k)
+            Z = np.asarray(X @ U[:, j0:j1]) - offset[j0:j1]
+            if sparse_W:
+                WZ = np.empty_like(Z)
+                WZ[perm] = _csr_matmat_permuted(W.indptr, W.indices, data,
+                                                np.ascontiguousarray(Z[perm]), perm, inv)
+            elif isinstance(W, _GridKernel):
+                WZ = W.matmat(Z)
+            else:
+                WZ = W @ Z
+            K[:, j0:j1] = U.T @ (_xt_times(X_t, WZ) - np.outer(mu, WZ.sum(axis=0)))
+        return (K + K.T) / (2.0 * denom)
+
+
+def grouped_weighted_variance(P, W=None, labels=None, *, bias=False,
+                              normalize_by_weights=False, order=None,
+                              n_jobs=DEFAULT_N_JOBS):
+    """
+    Per-group, per-column kernel-weighted variances in a single pass over W.
+
+    Row g of the result equals
+    ``diag(weighted_covariance(P[labels == g], W[g][:, g], ...))``: W is
+    restricted to pairs of cells in the same group, and each group is
+    centered by its own mean.  Unlike calling :func:`weighted_covariance` per
+    group, W is never sliced or copied, and only the diagonal is computed.
+
+    Parameters
+    ----------
+    P : (n, k) array-like
+        Data (e.g. projections onto components); dense.
+    W : (n, n) ndarray, scipy.sparse matrix, _GridKernel, or None
+        Symmetric weights.  ``None`` gives plain per-group variances.
+    labels : (n,) int array, optional
+        Group codes ``0 .. G-1``.  ``None`` puts all rows in one group.
+    bias, normalize_by_weights : bool
+        Normalization, as in :func:`weighted_covariance` (per group:
+        ``n_g - 1``, ``n_g``, or ``S0_g = Σ_{i,l∈g} W_il``).
+    order : (n,) int array, optional
+        Row visiting order for sparse *W* (from :func:`rcm_order`).  Computed
+        if not given; pass it to reuse across calls with the same *W*.
+    n_jobs : int, default 16
+        Number of threads.  ``-1`` uses all cores.
+
+    Returns
+    -------
+    var : (G, k) float64 ndarray
+        NaN where the normalization is not positive (e.g. a single-cell group
+        with ``bias=False``).
+    """
+    P = np.ascontiguousarray(P, dtype=np.float64)
+    n, k = P.shape
+    labels = (np.zeros(n, dtype=np.int64) if labels is None
+              else np.ascontiguousarray(labels, dtype=np.int64))
+    n_groups = int(labels.max()) + 1 if n else 0
+    counts = np.bincount(labels, minlength=n_groups).astype(np.float64)
+
+    # (G, n) indicator: group sums of any per-row quantity are M @ values
+    M = scipy.sparse.csr_matrix(
+        (np.ones(n), (labels, np.arange(n))), shape=(n_groups, n)
+    )
+    with np.errstate(invalid='ignore', divide='ignore'):
+        means = np.asarray(M @ P) / counts[:, None]
+    Pc = P - means[labels]   # each group centered by its own mean
+
+    with _n_threads(n_jobs):
+        if W is None:
+            q, s = Pc * Pc, None
+        elif isinstance(W, _GridKernel):
+            q, s = np.empty((n, k)), np.empty(n)
+            for g in range(n_groups):
+                idx = np.flatnonzero(labels == g)
+                q[idx] = W.matmat(Pc[idx], idx) * Pc[idx]
+                s[idx] = W.row_sums(idx)
+        elif scipy.sparse.issparse(W):
+            W = W.tocsr()
+            perm = rcm_order(W) if order is None else np.asarray(order, dtype=np.int64)
+            inv = np.empty_like(perm)
+            inv[perm] = np.arange(n)
+            qp, sp_ = np.empty((n, k)), np.empty(n)
+            _grouped_quadform_rows(
+                W.indptr, W.indices, _sparse_values(W),
+                np.ascontiguousarray(Pc[perm]), labels[perm], perm, inv, qp, sp_,
+            )
+            q, s = np.empty((n, k)), np.empty(n)
+            q[perm], s[perm] = qp, sp_
+        else:
+            W = np.asarray(W, dtype=np.float64)
+            q, s = np.empty((n, k)), np.empty(n)
+            for g in range(n_groups):
+                idx = np.flatnonzero(labels == g)
+                Wg = W[np.ix_(idx, idx)]
+                q[idx] = (Wg @ Pc[idx]) * Pc[idx]
+                s[idx] = Wg.sum(axis=1)
+
+    num = np.asarray(M @ q)
+    if W is not None and normalize_by_weights:
+        denom = np.asarray(M @ s).ravel()
+    else:
+        denom = counts if bias else counts - 1
+    out = np.full((n_groups, k), np.nan)
+    ok = denom > 0
+    out[ok] = num[ok] / denom[ok, None]
+    return out
 
 
 def compute_covariance(

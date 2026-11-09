@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+import scipy.sparse
 import warnings
 
 import matplotlib.pyplot as plt
@@ -7,7 +8,9 @@ import matplotlib.pyplot as plt
 from .rhopca import rhoPCA
 from ..utils.misc import standardize_array, generalized_eigen
 from ..utils.covariance import (
-    DEFAULT_N_JOBS, _n_threads, compute_covariance, weighted_covariance,
+    DEFAULT_N_JOBS, _GridKernel, _column_means, _n_threads, _subspace_quadratic,
+    _weight_operator,
+    grouped_weighted_variance, rcm_order, weighted_covariance,
 )
 from ..utils.plotting import resolve_continuous_palette
 
@@ -51,9 +54,10 @@ class kernelRhoPCA(rhoPCA):
           weight matrix sparse, which large datasets need; about
           10 × bandwidth keeps a Gaussian close to its untapered shape.
 
-        With 100,000 or more cells and no ``support``, a Gaussian uses
-        ``support = 10 × bandwidth`` automatically (with a warning); other
-        kernels raise an error.
+        With 100,000 or more cells on a regular 2-D grid, weights are applied
+        by FFT and ``W`` is not stored.  Otherwise, with 100,000 or more cells
+        and no ``support``, a Gaussian uses ``support = 10 × bandwidth``
+        (with a warning) and other kernels raise an error.
     background_kernel : bool, default False
         Apply ``kernel`` to the background covariance as well.
     scale_variance : bool, default False
@@ -61,6 +65,21 @@ class kernelRhoPCA(rhoPCA):
     n_components : int or None, default 50
         Number of generalized eigenvectors to retain.  ``None`` keeps all valid
         components (memory for projections grows as n_obs x n_components).
+
+    Attributes
+    ----------
+    W_target_, W_background_ : ndarray, sparse matrix, or None
+        Weight matrices.  ``None`` without a kernel or on the FFT path.
+    eigvals_unweighted_ : (k,) ndarray or None
+        Unweighted eigenvalues (``solver='subspace'``).
+    eigvecs_unweighted_ : (p, k) ndarray or None
+        Unweighted GEs (``solver='subspace'``).
+    mixing_ : (k, m) ndarray or None
+        Weighted GE ``j`` is ``eigvecs_unweighted_ @ mixing_[:, j]``
+        (``solver='subspace'``).
+    mixing_fractions_ : DataFrame or None
+        Fraction of each weighted GE (columns) from each unweighted GE (rows);
+        columns sum to 1 (``solver='subspace'``).
     """
 
     def __init__(
@@ -152,7 +171,7 @@ class kernelRhoPCA(rhoPCA):
 
 
     def fit(self, *, method='schur', mu=None, bias=False, normalize_by_weights=False,
-            verbose=False, n_jobs=DEFAULT_N_JOBS):
+            verbose=False, n_jobs=DEFAULT_N_JOBS, solver='full', n_basis=200):
         """
         Compute the (kernel-weighted) generalized eigendecomposition.
 
@@ -179,7 +198,22 @@ class kernelRhoPCA(rhoPCA):
             covariance products, eigendecomposition, and projections (and
             later for :meth:`get_rhos`).  ``-1`` uses all cores.  Capped at
             the number of cores available.
+        solver : {'full', 'subspace'}, default ``'full'``
+            ``'full'`` solves the p x p weighted problem.  ``'subspace'`` mixes
+            the top ``n_basis`` unweighted GEs.
+        n_basis : int, default 200
+            Number of unweighted GEs for ``solver='subspace'``.  Must be at
+            least ``n_components``.
         """
+        if solver not in ('full', 'subspace'):
+            raise ValueError(f"Unknown solver '{solver}'. Use 'full' or 'subspace'.")
+        if solver == 'subspace':
+            n_basis = min(n_basis, self.adata_target.shape[1])
+            if n_basis < self.n_components:
+                raise ValueError(
+                    f"n_basis ({n_basis}) must be at least n_components ({self.n_components})."
+                )
+
         self.method = method
         self.verbose = verbose
         self.bias = bias
@@ -207,48 +241,58 @@ class kernelRhoPCA(rhoPCA):
             f"kernel='{self.kernel}'" + (f", {self.kernel_kwargs}" if self.kernel_kwargs else "")
             if target_kernel is not None else "no kernel"
         )
-        self._log("Covariance", f"Computing target covariance ({kernel_str})...")
-        Sigma_t, self.W_target_ = compute_covariance(
-            X_t,
-            kernel=target_kernel,
-            bias=bias,
-            normalize_by_weights=normalize_by_weights,
-            return_weights=True,
-            n_jobs=n_jobs,
-            coordinates=self._target_coords if target_kernel is not None else None,
-            kernel_kwargs=self.kernel_kwargs,
-        )
+        if solver == 'subspace' and target_kernel is None:
+            warnings.warn("solver='subspace' needs a target kernel; using solver='full'.")
+            solver = 'full'
+        self.solver = solver
+
+        self.eigvals_unweighted_ = None
+        self.eigvecs_unweighted_ = None
+        self.mixing_ = None
+        self.mixing_fractions_ = None
+        self._background_var = None   # cached by get_rhos
+        self._target_order = None
+
+        covariance = dict(bias=bias, normalize_by_weights=normalize_by_weights, n_jobs=n_jobs)
+
+        self._W_target = self._weights(target_kernel, self._target_coords, 'target')
+        self.W_target_ = None if isinstance(self._W_target, _GridKernel) else self._W_target
 
         if self.identity_background:
             self._log("Covariance", "Background is Identity — skipping background covariance.")
             Sigma_b = None
+            self._W_background = None
             self.W_background_ = None
         else:
             X_b = standardize_array(self._background_X) if self.scale_variance else self._background_X
             background_kernel = self.kernel if use_background_kernel else None
             bg_kernel_str = kernel_str if background_kernel is not None else "no kernel"
             self._log("Covariance", f"Computing background covariance ({bg_kernel_str})...")
-            Sigma_b, self.W_background_ = compute_covariance(
-                X_b,
-                kernel=background_kernel,
-                bias=bias,
-                normalize_by_weights=normalize_by_weights,
-                return_weights=True,
-                n_jobs=n_jobs,
-                coordinates=self._background_coords if background_kernel is not None else None,
-                kernel_kwargs=self.kernel_kwargs,
+            self._W_background = self._weights(background_kernel, self._background_coords, 'background')
+            self.W_background_ = (
+                None if isinstance(self._W_background, _GridKernel) else self._W_background
             )
+            Sigma_b = weighted_covariance(X_b, self._W_background, **covariance)
+
+        self._log("Covariance", f"Computing target covariance ({kernel_str})...")
+        if solver == 'full':
+            Sigma_t = weighted_covariance(X_t, self._W_target, **covariance)
+        else:
+            Sigma_t = weighted_covariance(X_t, None, bias=bias, n_jobs=n_jobs)
 
         self._log("Covariance", "Complete.")
 
         with _n_threads(n_jobs):
             self._log("Eigendecomposition", "Computing eigenvectors and eigenvalues...")
-            self.eigvals, self.eigvecs = generalized_eigen(
-                Sigma_t, Sigma_b, method=method, mu=mu, n_components=self.n_components
-            )
+            if solver == 'full':
+                self.eigvals, self.eigvecs = generalized_eigen(
+                    Sigma_t, Sigma_b, method=method, mu=mu, n_components=self.n_components
+                )
+            else:
+                self._fit_subspace(X_t, Sigma_t, Sigma_b, method, mu, n_basis, covariance)
             self._log("Eigendecomposition", "Complete.")
 
-            mu_t = np.asarray(X_t.mean(axis=0), dtype=np.float64).ravel()
+            mu_t = _column_means(X_t)
 
             self._log("Projecting", "...")
             self.target_proj = np.asarray(X_t @ self.eigvecs) - mu_t @ self.eigvecs
@@ -256,12 +300,53 @@ class kernelRhoPCA(rhoPCA):
             if self.identity_background:
                 self.background_proj = None
             else:
-                mu_b = np.asarray(X_b.mean(axis=0), dtype=np.float64).ravel()
+                mu_b = _column_means(X_b)
                 self.background_proj = np.asarray(X_b @ self.eigvecs) - mu_b @ self.eigvecs
 
         self._log("", "Finished computing projections.")
         self.loadings = self.eigvecs * np.sqrt(np.abs(self.eigvals))
-        
+
+    def _weights(self, kernel, coordinates, group):
+        """Weights for ``group`` ('target' or 'background'), or ``None`` without a kernel."""
+        if kernel is None:
+            return None
+        W = _weight_operator(
+            coordinates.shape[0],
+            kernel=kernel,
+            coordinates=coordinates,
+            kernel_kwargs=self.kernel_kwargs,
+            n_jobs=self.n_jobs,
+        )
+        if isinstance(W, _GridKernel):
+            self._log("Weights", f"Using FFT on a regular grid for {group} weights "
+                                 f"(FFT grid {W.grid[0]} x {W.grid[1]}); W is not stored.")
+        return W
+
+    def _fit_subspace(self, X_t, Sigma_t, Sigma_b, method, mu, n_basis, covariance):
+        """Mix the top ``n_basis`` unweighted GEs under the target weights."""
+        self.eigvals_unweighted_, U = generalized_eigen(
+            Sigma_t, Sigma_b, method=method, mu=mu, n_components=n_basis
+        )
+        self.eigvecs_unweighted_ = U
+
+        if scipy.sparse.issparse(self._W_target):
+            self._target_order = rcm_order(self._W_target)
+        K = _subspace_quadratic(X_t, U, self._W_target, order=self._target_order, **covariance)
+        Kb = None if Sigma_b is None else U.T @ Sigma_b @ U
+        if Kb is not None:
+            Kb = (Kb + Kb.T) / 2.0
+
+        self.eigvals, self.mixing_ = generalized_eigen(
+            K, Kb, method=method, mu=mu, n_components=self.n_components
+        )
+        self.eigvecs = U @ self.mixing_
+
+        squared = self.mixing_ ** 2
+        self.mixing_fractions_ = pd.DataFrame(
+            squared / squared.sum(axis=0),
+            index=[f"GE {i + 1}" for i in range(squared.shape[0])],
+            columns=[f"wGE {j + 1}" for j in range(squared.shape[1])],
+        )
 
     def get_rhos(self, *, group_by=None):
         """
@@ -271,7 +356,8 @@ class kernelRhoPCA(rhoPCA):
         ``rho = vᵀ Σ_t^W v / vᵀ Σ_b v``, using the same weight matrices and
         normalization (``bias``, ``normalize_by_weights``) as :meth:`fit`.
         For the full target this equals the eigenvalues.  Per-group target
-        variances restrict ``W`` to the cells in that group.
+        variances restrict ``W`` to pairs of cells in that group; all groups
+        are computed in a single pass over ``W``.
 
         When ``adata_background='Identity'``, there is no background projection
         so rho is undefined.  The eigenvalues of the target covariance are
@@ -294,42 +380,37 @@ class kernelRhoPCA(rhoPCA):
             )
 
 
-        groups = (
-            self.adata_target.obs[group_by].unique()
-            if group_by is not None
-            else np.array(['All'])
-        )
-
-        rhos = np.empty((len(groups), n_components))
-
-        for i, group in enumerate(groups):
-            t_mask = (
-                self._get_obs('target', group_by) == group
-                if group_by is not None
-                else slice(None)
+        if group_by is not None:
+            codes, groups = pd.factorize(
+                self._get_obs('target', group_by), use_na_sentinel=False
             )
-            t_var = self._weighted_proj_var(self.target_proj, self.W_target_, t_mask)
-            b_var = self._weighted_proj_var(self.background_proj, self.W_background_)
-            rhos[i, :] = np.divide(
-                t_var, b_var,
-                out=np.full_like(t_var, np.nan),
-                where=b_var > 0,
-            )
+        else:
+            codes, groups = None, np.array(['All'])
 
-        return pd.DataFrame(data=rhos, index=groups, columns=columns)
-
-    def _weighted_proj_var(self, proj, W, mask=slice(None)):
-        """Per-component (kernel-weighted) variance of projections, as in fit."""
-        if W is not None and not isinstance(mask, slice):
-            idx = np.flatnonzero(mask)
-            W = W[idx][:, idx] if hasattr(W, 'tocsr') else W[np.ix_(idx, idx)]
-        cov = weighted_covariance(
-            proj[mask, :], W,
+        variance = dict(
             bias=self.bias,
             normalize_by_weights=self.normalize_by_weights,
             n_jobs=self.n_jobs,
         )
-        return np.diag(cov)
+        # The row order of a sparse W and the background variance do not depend
+        # on group_by, so they are computed once per fit.
+        if self._target_order is None and scipy.sparse.issparse(self._W_target):
+            self._target_order = rcm_order(self._W_target)
+        t_var = grouped_weighted_variance(
+            self.target_proj, self._W_target, codes, order=self._target_order, **variance
+        )
+        if self._background_var is None:
+            self._background_var = grouped_weighted_variance(
+                self.background_proj, self._W_background, **variance
+            )[0]
+        b_var = self._background_var
+
+        rhos = np.divide(
+            t_var, b_var,
+            out=np.full_like(t_var, np.nan),
+            where=b_var > 0,
+        )
+        return pd.DataFrame(data=rhos, index=groups, columns=columns)
 
     # _plot_scatter and _plot_hist are inherited from rhoPCA.
 

@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 
 from ..utils.misc import standardize_array, generalized_eigen
-from ..utils.covariance import compute_covariance
+from ..utils.covariance import _column_means, compute_covariance
 from ..utils.plotting import check_discrete, resolve_palette
 
 
@@ -122,8 +122,8 @@ class rhoPCA:
         )
         self._log("Eigendecomposition", "Complete.")
 
-        mu_t = np.asarray(X_t.mean(axis=0), dtype=np.float64).ravel()
-        mu_b = np.asarray(X_b.mean(axis=0), dtype=np.float64).ravel()
+        mu_t = _column_means(X_t)
+        mu_b = _column_means(X_b)
         self.target_proj = np.asarray(X_t @ self.eigvecs) - mu_t @ self.eigvecs
         self.background_proj = np.asarray(X_b @ self.eigvecs) - mu_b @ self.eigvecs
         self.loadings = self.eigvecs * np.sqrt(self.eigvals)
