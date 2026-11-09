@@ -93,9 +93,14 @@ _AUTO_SUPPORT_FACTOR = 10.0
 # Refuse to build a sparse W with more stored entries than this (~8 GB).
 _MAX_SPARSE_NNZ = 1_000_000_000
 
-# Number of points subsampled to estimate the median distance (and the
+# Number of points subsampled to estimate the default bandwidth (and the
 # number of neighbors on the fallback search path) for large datasets.
 _N_SUBSAMPLE = 2000
+
+# Default Gaussian bandwidth: median distance to the k-th nearest neighbor,
+# k = min(_DEFAULT_NEIGHBORS, n_obs // _NEIGHBORS_PER_OBS), at least 1.
+_DEFAULT_NEIGHBORS = 100
+_NEIGHBORS_PER_OBS = 200
 
 # Number of gene columns processed at once in the sparse-W covariance.
 # Small blocks keep the neighbors' rows of each block in cache.
@@ -385,14 +390,38 @@ def _max_offdiag(indptr, indices, data):
     return row_max.max() if n > 0 else 0.0
 
 
+class _TooManyNeighbors(ValueError):
+    def __init__(self, nnz, n_obs, support):
+        self.nnz, self.n_obs, self.support = nnz, n_obs, support
+        super().__init__(
+            f"support={support:.4g} gives about {nnz / n_obs:,.0f} neighbors per "
+            f"observation (~{nnz:.2g} stored weights, ~{nnz * 8 / 1e9:.0f} GB). "
+            "Use a smaller kernel_kwargs['support']."
+        )
+
+
 def _check_nnz(nnz, n_obs, support):
     if nnz > _MAX_SPARSE_NNZ:
-        raise ValueError(
-            f"support={support:.4g} gives about {nnz / n_obs:.0f} neighbors per "
-            f"observation (~{nnz:.2g} stored weights, ~{nnz * 8 / 1e9:.0f} GB). "
-            "Use a smaller kernel_kwargs['support'] (or a smaller 'bandwidth' for "
-            "'gaussian', which sets the automatic support)."
-        )
+        raise _TooManyNeighbors(nnz, n_obs, support)
+
+
+def _too_many_neighbors_message(err, kernel, kw, default_k, auto_support):
+    """Error message for a sparse ``W`` over the size limit."""
+    size = (f"gives about {err.nnz / err.n_obs:,.0f} neighbors per observation "
+            f"(~{err.nnz:.2g} stored weights, ~{err.nnz * 8 / 1e9:.0f} GB).")
+    if kernel != 'gaussian':
+        return f"support = {err.support:.4g} {size} Pass a smaller kernel_kwargs['support']."
+    if default_k is None:
+        bandwidth = f"bandwidth = {kw['bandwidth']:.4g}"
+    else:
+        bandwidth = (f"Default bandwidth = {kw['bandwidth']:.4g} (median distance to "
+                     f"the {default_k}th nearest neighbor)")
+    if auto_support:
+        return (f"{bandwidth} with automatic support = {_AUTO_SUPPORT_FACTOR:g} x bandwidth "
+                f"= {err.support:.4g} {size} Lower kernel_kwargs['bandwidth'] or pass "
+                f"kernel_kwargs['support'] below {err.support:.4g}.")
+    return (f"{bandwidth} with support = {err.support:.4g} {size} "
+            "Pass a smaller kernel_kwargs['support'].")
 
 
 def _radius_neighbors_grid(coords, radius):
@@ -483,9 +512,7 @@ def build_weight_matrix(
     in memory, so a missing ``support`` is chosen automatically for
     ``'gaussian'`` as ``10 × bandwidth`` (with a warning); other kernels
     require ``support``.  If the support would give too many neighbors, a
-    ``ValueError`` is raised.  Note that the default Gaussian bandwidth (the
-    median pairwise distance) is on the scale of the whole dataset, so large
-    datasets need an explicit, local ``bandwidth``.
+    ``ValueError`` is raised.
 
     Parameters
     ----------
@@ -509,10 +536,35 @@ def build_weight_matrix(
                                     dict(kernel_kwargs or {}), n_jobs)
 
 
-def _resolve_bandwidth(kernel, kw, coords):
-    """Fill in the default Gaussian bandwidth (subsampled median distance)."""
-    if kernel == 'gaussian' and 'bandwidth' not in kw:
-        kw['bandwidth'] = float(np.median(_pdist(_subsample(coords))))
+def _default_neighbors(n_obs):
+    return max(1, min(_DEFAULT_NEIGHBORS, n_obs // _NEIGHBORS_PER_OBS))
+
+
+def _resolve_bandwidth(kernel, kw, coords=None, distances=None, n_jobs=DEFAULT_N_JOBS):
+    """
+    Fill in the default Gaussian bandwidth: the median distance to the k-th
+    nearest neighbor (see :func:`_default_neighbors`), over a subsample of
+    points.  Returns k if the default was used, else ``None``.
+    """
+    if kernel != 'gaussian' or 'bandwidth' in kw:
+        return None
+    if distances is not None:
+        D = squareform_from_condensed(np.ascontiguousarray(distances, dtype=np.float64))
+        k = _default_neighbors(D.shape[0])
+        rows = _subsample(np.arange(D.shape[0])[:, None]).ravel()
+        kth = np.partition(D[rows], k, axis=1)[:, k]
+    else:
+        k = _default_neighbors(coords.shape[0])
+        workers = -1 if n_jobs in (None, -1) else int(n_jobs)
+        kth = cKDTree(coords).query(_subsample(coords), k=k + 1, workers=workers)[0][:, k]
+    bandwidth = float(np.median(kth))
+    if not bandwidth > 0:
+        raise ValueError(
+            "The default bandwidth is 0 (many duplicate coordinates); pass "
+            "kernel_kwargs['bandwidth']."
+        )
+    kw['bandwidth'] = bandwidth
+    return k
 
 
 def _dense_from_condensed(weights, diag_value):
@@ -533,17 +585,15 @@ def _build_weight_matrix(n_obs, kernel, coordinates, distances, kw, n_jobs):
 
     # dense path from precomputed distances
     if distances is not None:
+        _resolve_bandwidth(kernel, kw, distances=distances)
         weights = apply_kernel(distances, kernel, kernel_kwargs=kw)
         return _dense_from_condensed(weights, _kernel_at_zero(kernel, kw))
 
     large = n_obs >= _MAX_DENSE_OBS
+    default_k = _resolve_bandwidth(kernel, kw, coords, n_jobs=n_jobs)
 
-    # Resolve the default Gaussian bandwidth over all pairs (subsampled when
-    # large), not just the pairs within the support.
-    if 'support' in kw or large:
-        _resolve_bandwidth(kernel, kw, coords)
-
-    if 'support' not in kw and large:
+    auto_support = 'support' not in kw and large
+    if auto_support:
         if kernel != 'gaussian':
             raise ValueError(
                 f"{n_obs} observations are too many for a dense weight matrix. "
@@ -566,10 +616,15 @@ def _build_weight_matrix(n_obs, kernel, coordinates, distances, kw, n_jobs):
     # sparse path: only pairs closer than the support (each point with itself
     # included, so the diagonal is the kernel value at zero distance)
     support = float(kw['support'])
-    found = _radius_neighbors_grid(coords, support)
-    self_included = found is not None
-    if not self_included:
-        found = _radius_neighbors_fallback(coords, support, n_jobs)
+    try:
+        found = _radius_neighbors_grid(coords, support)
+        self_included = found is not None
+        if not self_included:
+            found = _radius_neighbors_fallback(coords, support, n_jobs)
+    except _TooManyNeighbors as err:
+        raise ValueError(
+            _too_many_neighbors_message(err, kernel, kw, default_k, auto_support)
+        ) from None
     indptr, indices, values = found
 
     if callable(kernel):
@@ -751,7 +806,7 @@ def _weight_operator(n_obs, *, kernel, coordinates, kernel_kwargs=None, n_jobs=D
         lattice = _detect_lattice(coords)
         if lattice is not None:
             kw = dict(kernel_kwargs or {})
-            _resolve_bandwidth(kernel, kw, coords)
+            _resolve_bandwidth(kernel, kw, coords, n_jobs=n_jobs)
             with _n_threads(n_jobs):
                 return _GridKernel(*lattice, kernel, kw, n_jobs)
     return build_weight_matrix(n_obs, kernel=kernel, coordinates=coordinates,

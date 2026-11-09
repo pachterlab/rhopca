@@ -45,8 +45,8 @@ class kernelRhoPCA(rhoPCA):
         Kernel parameters:
 
         * ``bandwidth`` — ``'gaussian'`` width σ: how quickly weights decay with
-          distance (never exactly zero).  Defaults to the median pairwise
-          distance, which is on the scale of the whole dataset.
+          distance (never exactly zero).  Defaults to the median distance to
+          the k-th nearest neighbor, k = min(100, n_cells // 200) (at least 1).
         * ``buffer`` — ``'inverse_distance'`` offset in ``1 / (d + buffer)``.
         * ``support`` — distance beyond which weights are exactly zero.
           Required for ``'wendland'``; optional for other kernels, which are
